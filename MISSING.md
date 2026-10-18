@@ -93,7 +93,7 @@ What has to change:
 - [ ] **Parallelism is one process per file.** Fine for many fineweb/finemath shards, but python_edu
       as one huge parquet would tokenize on a single core. Splitting it into ~250k-blob files when
       downloading (above) fixes this.
-- [ ] Re-run `verify.py` on every new token file.
+- [ ] Re-run `verify_tokenized.py` on every new token file.
 - [ ] Disk: ~10 GB of uint16 tokens + ~15 GB new raw data. The Mac has ~96 GB free, so it fits.
 
 ## 3. Mix: `mix.yaml`, `mix.py`, `verify_mix.py`
@@ -201,7 +201,7 @@ All `TrainSettings` defaults are for a quick Mac test (`max_steps=500`, `warmup_
 ## Suggested order
 
 1. Decisions (section 0): context 1024 and BPB window 1024 are decided; benchmarks stay on MPS.
-2. Extend `download.py` and `tokenize_data.py`, fetch and tokenize the data, run `verify.py`.
+2. Extend `download.py` and `tokenize_data.py`, fetch and tokenize the data, run `verify_tokenized.py`.
 3. `mix.yaml` (1024) → `mix.py` → `verify_mix.py`.
 4. Add the 124M config, pin the BPB window to 1024, and make the training loop fixes, checkpointing
    and MFU logging.

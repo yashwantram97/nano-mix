@@ -1,6 +1,6 @@
 """Check the token files in data/tokenized/<source>/ against their meta.json.
 
-    uv run python verify.py
+    uv run python verify_tokenized.py
 """
 
 import json
@@ -8,10 +8,12 @@ import random
 from pathlib import Path
 
 import numpy as np
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 SLICE = 300
 GB = 1e9
+BLOCK = 64 * 2**20  # tokens per read (128 MB), so the bar moves inside large files
 
 
 def verify(source_dir, tok):
@@ -19,10 +21,20 @@ def verify(source_dir, tok):
     files = [np.memmap(source_dir / f["file"], dtype=meta["dtype"], mode="r") for f in meta["files"]]
     nbytes = sum((source_dir / f["file"]).stat().st_size for f in meta["files"])
 
+    # One pass over each file for both the max id and the EOS count.
+    max_id = eos_count = 0
+    with tqdm(total=nbytes, unit="B", unit_scale=True, desc=f"  {source_dir.name}") as bar:
+        for tokens in files:
+            for start in range(0, len(tokens), BLOCK):
+                block = np.asarray(tokens[start : start + BLOCK])
+                max_id = max(max_id, int(block.max(initial=0)))
+                eos_count += int((block == meta["eos_id"]).sum())
+                bar.update(block.nbytes)
+
     checks = {
         "bytes/2 == num_tokens": nbytes // 2 == meta["num_tokens"] and nbytes % 2 == 0,
-        "max id < vocab": max(int(t.max()) for t in files) < len(tok),
-        "EOS count == num_docs": sum(int((t == meta["eos_id"]).sum()) for t in files) == meta["num_docs"],
+        "max id < vocab": max_id < len(tok),
+        "EOS count == num_docs": eos_count == meta["num_docs"],
     }
     print(f"\n=== {source_dir.name}")
     for name, ok in checks.items():

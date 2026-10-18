@@ -40,7 +40,7 @@ Read from the installed source (`olmo_core/data/source_mixture.py`, `numpy_datas
 - **The seed doesn't change the content.** Which tokens end up in the mix depends only on the file
   sizes. Order is shuffled later, by the data loader at training time.
 - **Token counts come from file sizes** (bytes / 2 for uint16), so the files must have no `.npy`
-  header. `verify.py` checks that.
+  header. `verify_tokenized.py` checks that.
 
 ## `mix.yaml`
 
@@ -150,7 +150,7 @@ After the python_edu download (250,000 files) finishes:
 uv sync                                     # once: installs OLMo-core and torch (done 2026-10-09)
 rm data/tokenized/python_edu/pilot-5000.npy data/tokenized/python_edu/meta.json
 uv run python tokenize_data.py --source python_edu
-uv run python verify.py
+uv run python verify_tokenized.py
 uv run python mix.py
 ```
 

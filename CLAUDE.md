@@ -13,8 +13,8 @@ Building pretraining data for a ~100M-parameter model. The first experiment is a
   command with `HF_HUB_OFFLINE=1`; the tokenizer is cached locally.
 
 ## Pipeline
-1. **Download**: `download.py` saves raw data to `data/raw/<source>/`
-2. **Tokenize**: `tokenize_data.py` saves token files to `data/tokenized/<source>/`; `verify.py` checks them
+1. **Download**: `download.py` saves raw data to `data/raw/<source>/`; `verify_download.py` checks it
+2. **Tokenize**: `tokenize_data.py` saves token files to `data/tokenized/<source>/`; `verify_tokenized.py` checks them
 3. **Mix**: `mix.py` builds the training mix from `data/tokenized/` with OLMo-core's source mixture
    API (`SourceMixtureDatasetConfig` + `NumpyFSLDatasetConfig.from_src_mix`, ai2-olmo-core 3.0.0).
    All settings are in `mix.yaml`; OLMo-core caches index files in `data/mix/`. `verify_mix.py`
