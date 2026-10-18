@@ -2,7 +2,7 @@
 
 Raw data only, no processing. Files already on disk are skipped, so an interrupted run can be re-run.
 
-    uv run python download.py --source {fineweb_edu,finemath,gutenberg,python_edu,all} [--workers N]
+    uv run python download.py --source {fineweb_edu,finemath,gutenberg,python_edu,all} [--processes N] [--workers N]
 
 python_edu's metadata comes from HF; its code is fetched from Software Heritage S3 in chunks of
 CHUNK_ROWS metadata rows, one parquet file per chunk.
@@ -12,9 +12,11 @@ import argparse
 import datetime as dt
 import gzip
 import json
+import multiprocessing as mp
 import os
 import shutil
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from fnmatch import fnmatch
 from pathlib import Path
@@ -98,11 +100,17 @@ def count_docs(path):
 # ---------------------------------------------------------------- python_edu content from S3
 
 
-def s3_client(workers, test_blob_id):
+def make_s3_client(mode, threads):
+    config = Config(max_pool_connections=threads, retries={"max_attempts": 5, "mode": "adaptive"})
+    if mode == "anonymous":
+        config = config.merge(Config(signature_version=UNSIGNED))
+    return boto3.client("s3", region_name="us-east-1", config=config)
+
+
+def s3_client(threads, test_blob_id):
     """Try anonymous access first, then the AWS credentials from the standard boto3 config."""
-    pool = Config(max_pool_connections=workers, retries={"max_attempts": 5, "mode": "adaptive"})
-    for mode, config in [("anonymous", pool.merge(Config(signature_version=UNSIGNED))), ("aws-credentials", pool)]:
-        client = boto3.client("s3", region_name="us-east-1", config=config)
+    for mode in ("anonymous", "aws-credentials"):
+        client = make_s3_client(mode, threads)
         try:
             client.get_object(Bucket="softwareheritage", Key=f"content/{test_blob_id}")
             return client, mode
@@ -168,15 +176,37 @@ def content_rows_on_disk(out_dir):
                if p.name != PILOT_DUPLICATE)
 
 
-def fetch_chunk(client, metadata_file, rows, out, failed_log, workers, bars):
-    """Fetch one chunk's rows from S3 into the parquet file out. Returns (fetched, failed)."""
+_fetched_counter = None  # in each worker process: shared count of blobs done, read by the main process for the bars
+
+
+def _init_fetch_worker(counter):
+    global _fetched_counter
+    _fetched_counter = counter
+
+
+def fetch_chunk(job):
+    """In a worker process: fetch one chunk's rows from S3 into the parquet file out. Returns (name, fetched, failed).
+
+    Keeps threads * 4 requests in flight and submits the next one as each finishes (in order), so memory
+    stays flat and progress is counted from the first blob on.
+    """
+    metadata_file, rows, out, failed_log, mode, threads = job
+    client = make_s3_client(mode, threads)
     meta = pq.read_table(metadata_file, columns=["blob_id", "repo_name", "path", "score"]).take(rows).to_pylist()
-    texts = []
-    with ThreadPoolExecutor(workers) as pool:
-        for text in pool.map(lambda row: fetch_blob(client, row["blob_id"]), meta):
-            texts.append(text)
-            bars["python_edu"].update(1)
-            bars["overall"].update(CONTENT_BYTES_PER_ROW)
+    texts, unreported = [], 0
+    with ThreadPoolExecutor(threads) as pool:
+        window = deque(pool.submit(fetch_blob, client, row["blob_id"]) for row in meta[: threads * 4])
+        next_row = len(window)
+        while window:
+            texts.append(window.popleft().result())
+            if next_row < len(meta):
+                window.append(pool.submit(fetch_blob, client, meta[next_row]["blob_id"]))
+                next_row += 1
+            unreported += 1
+            if unreported == 500 or not window:
+                with _fetched_counter.get_lock():
+                    _fetched_counter.value += unreported
+                unreported = 0
 
     ok = [(row, text) for row, text in zip(meta, texts) if text is not None]
     table = pa.table({
@@ -189,12 +219,12 @@ def fetch_chunk(client, metadata_file, rows, out, failed_log, workers, bars):
     pq.write_table(table, out.with_suffix(".tmp"))
     os.replace(out.with_suffix(".tmp"), out)
     failed = [row["blob_id"] for row, text in zip(meta, texts) if text is None]
-    with open(failed_log, "a") as f:
+    with open(failed_log, "a") as f:  # one write per chunk, so lines from different processes don't mix
         f.write("".join(f"{b}\n" for b in failed))
-    return len(ok), len(failed)
+    return out.name, len(ok), len(failed)
 
 
-def fetch_python_edu(chunks, out_dir, workers, overall, estimated_rows):
+def fetch_python_edu(chunks, out_dir, processes, threads, overall, estimated_rows):
     """Fetch every chunk not yet on disk. Returns (manifest entries per chunk, total rows, seconds), or None without S3 access.
 
     estimated_rows is what the overall bar assumed before the chunks were planned; it is corrected here.
@@ -211,22 +241,38 @@ def fetch_python_edu(chunks, out_dir, workers, overall, estimated_rows):
     if todo:
         first_meta, first_rows = todo[0][1], todo[0][2]
         test_blob = pq.read_table(first_meta, columns=["blob_id"]).column("blob_id")[first_rows[0]].as_py()
-        client, mode = s3_client(workers, test_blob)
+        client, mode = s3_client(threads, test_blob)
         if client is None:
             tqdm.write(
                 "  No S3 access. To fix: run `aws configure` with any AWS account's keys (region us-east-1),\n"
                 "  check with `aws s3 ls s3://softwareheritage/content/ --max-items 1`, then re-run. Skipping python_edu content."
             )
             return None
-        tqdm.write(f"  S3 access: {mode}")
+        tqdm.write(f"  S3 access: {mode}; {processes} processes x {threads} threads")
         planned = sum(len(rows) for _, _, rows in chunks)
-        bars = {"overall": overall,
-                "python_edu": tqdm(total=planned, initial=planned - todo_rows, unit="file", desc="python_edu S3")}
-        for i, (name, metadata_file, rows) in enumerate(todo, 1):
-            bars["python_edu"].set_postfix_str(f"content file {i}/{len(todo)}")
-            fetched, failed = fetch_chunk(client, metadata_file, rows, content / name, out_dir / "failed_blob_ids.txt", workers, bars)
-            tqdm.write(f"  {name}: fetched {fetched:,}, failed {failed:,}")
-        bars["python_edu"].close()
+        bar = tqdm(total=planned, initial=planned - todo_rows, unit="file", desc="python_edu S3")
+        jobs = [(metadata_file, rows, content / name, out_dir / "failed_blob_ids.txt", mode, threads)
+                for name, metadata_file, rows in todo]
+        # Separate processes, each fetching whole content files with its own threads: one process alone
+        # is capped at about one core by the GIL.
+        ctx = mp.get_context("spawn")
+        counter = ctx.Value("q", 0)
+        with ctx.Pool(processes, initializer=_init_fetch_worker, initargs=(counter,)) as pool:
+            pending = [pool.apply_async(fetch_chunk, (job,)) for job in jobs]
+            reported, files_done = 0, 0
+            while pending:
+                time.sleep(1)
+                done = counter.value
+                bar.update(done - reported)
+                overall.update((done - reported) * CONTENT_BYTES_PER_ROW)
+                reported = done
+                for result in [r for r in pending if r.ready()]:
+                    pending.remove(result)
+                    name, fetched, failed = result.get()  # re-raises a worker's error
+                    files_done += 1
+                    tqdm.write(f"  {name}: fetched {fetched:,}, failed {failed:,}")
+                bar.set_postfix_str(f"content files {files_done}/{len(jobs)}")
+        bar.close()
 
     entries = [{"file": name, "metadata": path.name, "rows_planned": len(rows),
                 "rows_fetched": pq.ParquetFile(content / name).metadata.num_rows} for name, path, rows in chunks]
@@ -239,7 +285,8 @@ def fetch_python_edu(chunks, out_dir, workers, overall, estimated_rows):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, choices=[*SOURCES, "all"])
-    parser.add_argument("--workers", type=int, default=32, help="parallel S3 fetches for python_edu")
+    parser.add_argument("--processes", type=int, default=8, help="python_edu: content files fetched at once")
+    parser.add_argument("--workers", type=int, default=32, help="python_edu: S3 fetch threads per process")
     args = parser.parse_args()
     names = list(SOURCES) if args.source == "all" else [args.source]
     RAW.mkdir(parents=True, exist_ok=True)
@@ -301,7 +348,8 @@ def main():
         if name == "python_edu":
             docs = 0
             tqdm.write("  planning content files from the metadata...")
-            result = fetch_python_edu(python_edu_chunks(local_files), out_dir, args.workers, overall, content_rows_left)
+            result = fetch_python_edu(python_edu_chunks(local_files), out_dir, args.processes, args.workers,
+                                      overall, content_rows_left)
             if result is None:
                 status = "metadata only (no S3 access)"
             else:
