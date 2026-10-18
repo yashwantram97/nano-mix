@@ -1,21 +1,27 @@
-"""Pilot tokenization: the whole first raw file of each source into flat uint16 token files
-in data/tokenized/<source>/ for OLMo-core. Prints tokens/sec and full-run estimates.
+"""Tokenize every raw file of each source into flat uint16 token files in data/tokenized/<source>/
+for OLMo-core, one .npy per raw file with the same base name.
 
 Each document -> tokens (no special tokens) + EOS. No BOS, no padding, no chunking.
+Files whose .npy already exists are skipped (and still listed in meta.json), so an interrupted
+run can be re-run.
 
     uv run python tokenize_data.py --source {fineweb_edu,finemath,python_edu,gutenberg,all} [--workers N]
 """
 
 import argparse
 import gzip
+import io
 import json
+import multiprocessing as mp
 import os
 import time
-from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
+from tqdm import tqdm
+
+from download import EVAL_ONLY, PILOT_DUPLICATE
 
 # Parallelism comes from one process per input file; keep each tokenizer single-threaded.
 # (transformers is imported later, inside get_tokenizer(), so setting this here is early enough.)
@@ -35,33 +41,38 @@ SOURCES = {
     "gutenberg": ("gutenberg/**/*.json.gz", 8),
 }
 
-# Full-run sizes for the pilot estimate (from the HF listings used by download.py).
-FULL_RAW_BYTES = {"fineweb_edu": 44.76e9, "finemath": 18.37e9, "gutenberg": 7.63e9}
-PYTHON_EDU_DOCS = 7_678_448  # its raw content is fetched from S3, so estimate by document count
-
 
 def input_files(source):
-    return sorted(RAW.glob(SOURCES[source][0]))
+    """All raw files of a source, sorted. Refuses eval-only shards; skips the duplicate pilot file."""
+    files = sorted(p for p in RAW.glob(SOURCES[source][0]) if p.name != PILOT_DUPLICATE)
+    eval_only = [p for p in files if p.name == EVAL_ONLY.get(source)]
+    if eval_only:
+        raise SystemExit(f"{eval_only[0]} is reserved for the holdout set and must not be tokenized")
+    return files
 
 
 def read_batches(path, batch_size):
-    """Yield lists of document texts from a parquet or .json.gz file."""
+    """Yield (document texts, raw bytes read so far) from a parquet or .json.gz file."""
     if path.suffix == ".parquet":
-        for batch in pq.ParquetFile(path).iter_batches(batch_size=batch_size, columns=["text"]):
-            yield batch.column("text").to_pylist()
-    else:  # .json.gz, one JSON document per line
-        with gzip.open(path, "rt", encoding="utf-8") as lines:
+        pf = pq.ParquetFile(path)
+        size, rows, done = path.stat().st_size, pf.metadata.num_rows, 0
+        for batch in pf.iter_batches(batch_size=batch_size, columns=["text"]):
+            done += batch.num_rows
+            yield batch.column("text").to_pylist(), size * done // max(rows, 1)
+    else:  # .json.gz, one JSON document per line; progress is the position in the compressed file
+        with open(path, "rb") as raw, io.TextIOWrapper(gzip.GzipFile(fileobj=raw), encoding="utf-8") as lines:
             texts = []
             for line in lines:
                 texts.append(json.loads(line)["text"])
                 if len(texts) == batch_size:
-                    yield texts
+                    yield texts, raw.tell()
                     texts = []
             if texts:
-                yield texts
+                yield texts, raw.tell()
 
 
 _tokenizer = None
+_progress = None  # in each worker process: shared count of raw bytes done, read by the main process
 
 
 def get_tokenizer():
@@ -75,21 +86,34 @@ def get_tokenizer():
     return _tokenizer
 
 
+def _init_worker(counter):
+    global _progress
+    _progress = counter
+
+
+def _report(nbytes):
+    with _progress.get_lock():
+        _progress.value += nbytes
+
+
 def tokenize_file(job):
-    """Tokenize one input file into out_dir/<name>.npy. Returns stats for meta.json."""
-    path, out_dir, batch_size = job
+    """Tokenize one input file into out_dir/<name>.npy. Returns (source, stats for meta.json)."""
+    source, path, out_dir, batch_size = job
     out = out_dir / (path.name.split(".")[0] + ".npy")
+    size = path.stat().st_size
     if out.exists():
         tokens = np.memmap(out, dtype=DTYPE, mode="r")
-        return {"file": out.name, "raw": str(path), "num_tokens": len(tokens), "num_docs": int((tokens == get_tokenizer().eos_token_id).sum()), "skipped": True}
+        _report(size)
+        return source, {"file": out.name, "raw": str(path), "num_tokens": len(tokens),
+                        "num_docs": int((tokens == get_tokenizer().eos_token_id).sum()), "skipped": True}
 
     tok = get_tokenizer()
     eos = tok.eos_token_id
-    num_tokens = num_docs = 0
+    num_tokens = num_docs = reported = 0
     t0 = time.time()
     tmp = out.with_suffix(".npy.tmp")
     with open(tmp, "wb") as f:
-        for texts in read_batches(path, batch_size):
+        for texts, done in read_batches(path, batch_size):
             texts = [t for t in texts if t]  # skip empty / None
             # split_special_tokens: a literal "<|endoftext|>" inside a document must not become EOS.
             ids = tok(texts, add_special_tokens=False, split_special_tokens=True)["input_ids"]
@@ -98,9 +122,12 @@ def tokenize_file(job):
             arr.astype(DTYPE).tofile(f)  # raw values, no .npy header
             num_tokens += len(arr)
             num_docs += len(ids)
+            _report(min(done, size) - reported)
+            reported = min(done, size)
+    _report(size - reported)
     os.replace(tmp, out)
-    return {"file": out.name, "raw": str(path), "num_tokens": num_tokens, "num_docs": num_docs,
-            "seconds": time.time() - t0}
+    return source, {"file": out.name, "raw": str(path), "num_tokens": num_tokens, "num_docs": num_docs,
+                    "seconds": time.time() - t0}
 
 
 def main():
@@ -112,25 +139,50 @@ def main():
 
     jobs = []
     for name in names:
-        files = input_files(name)[:1]
+        files = input_files(name)
         if not files:
             print(f"{name}: no input files in {RAW / SOURCES[name][0]}, skipping")
         (OUT / name).mkdir(parents=True, exist_ok=True)
-        jobs += [(path, OUT / name, SOURCES[name][1]) for path in files]
+        jobs += [(name, path, OUT / name, SOURCES[name][1]) for path in files]
+        # mix.py globs every .npy in the folder, so a token file with no raw file would end up in the mix.
+        expected = {p.name.split(".")[0] + ".npy" for p in files}
+        stale = sorted(p.name for p in (OUT / name).glob("*.npy") if p.name not in expected)
+        if stale:
+            print(f"{name}: WARNING, token files with no raw file (remove them before mix.py): {stale}")
 
-    # Files run in parallel; results are matched back to their sources in sorted order.
-    print(f"Tokenizing {len(jobs)} files with {args.workers} workers -> {OUT}/")
+    # Largest files first, so the big ones don't end up running alone at the end.
+    jobs.sort(key=lambda job: job[1].stat().st_size, reverse=True)
+    sizes = sum(job[1].stat().st_size for job in jobs)
+    done_files = sum((job[2] / (job[1].name.split(".")[0] + ".npy")).exists() for job in jobs)
+    print(f"Tokenizing {len(jobs)} files ({sizes / GB:.1f} GB raw, {done_files} already done) "
+          f"with {args.workers} workers -> {OUT}/")
+
     t0 = time.time()
-    with Pool(args.workers) as pool:
-        results = pool.map(tokenize_file, jobs, chunksize=1)
+    results = {name: [] for name in names}
+    counter = mp.Value("q", 0)
+    with mp.Pool(args.workers, initializer=_init_worker, initargs=(counter,)) as pool, \
+            tqdm(total=sizes, unit="B", unit_scale=True, desc="tokenize", smoothing=0.05) as bar:
+        pending = [pool.apply_async(tokenize_file, (job,)) for job in jobs]
+        reported, files_done = 0, 0
+        while pending:
+            time.sleep(1)
+            done = counter.value
+            bar.update(done - reported)
+            reported = done
+            for result in [r for r in pending if r.ready()]:
+                pending.remove(result)
+                name, stats = result.get()  # re-raises a worker's error
+                results[name].append(stats)
+                files_done += 1
+            bar.set_postfix_str(f"files {files_done}/{len(jobs)}")
     wall = time.time() - t0
 
     manifest = json.loads((RAW / "manifest.json").read_text())
     eos = get_tokenizer().eos_token_id
-    print(f"\n{'source':12s} {'files':>5s} {'tokens':>14s} {'docs':>11s} {'GB':>6s}")
-    estimates = []
+    print(f"\n{'source':12s} {'files':>5s} {'tokens':>16s} {'docs':>12s} {'GB':>7s}")
+    new_tokens = 0
     for name in names:
-        files = [r for (_, out_dir, *_), r in zip(jobs, results) if out_dir.name == name]
+        files = sorted(results[name], key=lambda f: f["file"])
         if not files:
             continue
         meta = {
@@ -144,27 +196,10 @@ def main():
             "files": [{k: f[k] for k in ("file", "raw", "num_tokens", "num_docs")} for f in files],
         }
         (OUT / name / "meta.json").write_text(json.dumps(meta, indent=2))
-        print(f"{name:12s} {len(files):5d} {meta['num_tokens']:14,} {meta['num_docs']:11,} {meta['num_tokens'] * 2 / GB:6.2f}")
+        new_tokens += sum(f["num_tokens"] for f in files if not f.get("skipped"))
+        print(f"{name:12s} {len(files):5d} {meta['num_tokens']:16,} {meta['num_docs']:12,} {meta['num_tokens'] * 2 / GB:7.2f}")
 
-        if "seconds" in files[0]:  # not measured when the output already existed
-            f = files[0]
-            if name == "python_edu":
-                full_tokens = f["num_tokens"] / f["num_docs"] * PYTHON_EDU_DOCS
-            else:  # scale by raw bytes: this whole file -> the whole dataset
-                full_tokens = f["num_tokens"] / Path(f["raw"]).stat().st_size * FULL_RAW_BYTES[name]
-            estimates.append((name, f["num_tokens"] / f["seconds"], full_tokens))
-
-    print(f"\nwall time {wall:.0f}s")
-    if estimates:
-        print(f"\nFull-run estimate ({args.workers} workers, assuming per-file speed scales across workers):")
-        print(f"{'source':12s} {'tok/s/worker':>13s} {'tokens':>10s} {'disk GB':>8s} {'time':>8s}")
-        total_tokens = total_hours = 0
-        for name, rate, full_tokens in estimates:
-            hours = full_tokens / (rate * args.workers) / 3600
-            total_tokens += full_tokens
-            total_hours += hours
-            print(f"{name:12s} {rate:13,.0f} {full_tokens / 1e9:9.2f}B {full_tokens * 2 / GB:8.1f} {hours:7.1f}h")
-        print(f"{'total':12s} {'':>13s} {total_tokens / 1e9:9.2f}B {total_tokens * 2 / GB:8.1f} {total_hours:7.1f}h")
+    print(f"\nwall time {wall / 60:.1f} min; {new_tokens:,} new tokens ({new_tokens / max(wall, 1):,.0f} tokens/s)")
 
 
 if __name__ == "__main__":
