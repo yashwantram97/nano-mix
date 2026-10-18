@@ -226,6 +226,7 @@ def main():
     parser.add_argument("--workers", type=int, default=32, help="parallel S3 fetches for python_edu")
     args = parser.parse_args()
     names = list(SOURCES) if args.source == "all" else [args.source]
+    RAW.mkdir(parents=True, exist_ok=True)
 
     # 1. List each repo and check there is enough disk for what is still missing (+20% headroom).
     listings = {name: list_files(name) for name in names}
