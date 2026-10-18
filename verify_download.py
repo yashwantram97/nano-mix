@@ -20,6 +20,7 @@ from multiprocessing import Pool
 from pathlib import Path
 
 import pyarrow.parquet as pq
+from tqdm import tqdm
 
 from download import (
     EVAL_ONLY,
@@ -116,7 +117,7 @@ def check_python_edu_content(metadata_files):
     blob_ids = {p: pq.read_table(p, columns=["blob_id"]).column("blob_id").to_pylist() for p in metadata_files}
 
     seen, planned_total, fetched_total, missing_total, paths = set(), 0, 0, 0, []
-    for name, metadata_file, rows in python_edu_chunks(metadata_files):
+    for name, metadata_file, rows in tqdm(python_edu_chunks(metadata_files), desc="  content files", unit="file"):
         f = content / name
         if not f.exists():
             problems.append(f"python_edu: missing content file {f}")
@@ -197,8 +198,12 @@ def main():
 
     if args.deep:
         print(f"\nreading all {len(to_read)} files with {args.workers} processes...")
-        with Pool(args.workers) as pool:
+        # Largest first, so the long gutenberg/fineweb files don't all start at the end.
+        to_read.sort(key=lambda f: f.stat().st_size, reverse=True)
+        sizes = {str(f): f.stat().st_size for f in to_read}
+        with Pool(args.workers) as pool, tqdm(total=sum(sizes.values()), unit="B", unit_scale=True, desc="deep read") as bar:
             for path, rows, error in pool.imap_unordered(read_fully, to_read):
+                bar.update(sizes[path])
                 if error:
                     name = Path(path).relative_to(RAW).parts[0]
                     results[name][0].append(f"{name}: {path}: {error}")
