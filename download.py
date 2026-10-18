@@ -5,7 +5,7 @@ Raw data only, no processing. Files already on disk are skipped, so an interrupt
     uv run python download.py --source {fineweb_edu,finemath,gutenberg,python_edu,all} [--workers N]
 
 python_edu's metadata comes from HF; its code is fetched from Software Heritage S3 in chunks of
-CHUNK_ROWS metadata rows, one parquet file per chunk. Needs data/raw_eval/python_edu.parquet.
+CHUNK_ROWS metadata rows, one parquet file per chunk.
 """
 
 import argparse
@@ -46,7 +46,7 @@ EVAL_ONLY = {
 }
 
 # python_edu's holdout is the last 8,000 rows of this metadata file; the blob_ids it used are in
-# data/raw_eval/python_edu.parquet. Those rows are never fetched, and those blob_ids are skipped anywhere.
+# data/raw_eval/python_edu.parquet. Those rows are never fetched, and their blob_ids are skipped anywhere.
 PYTHON_EDU_EVAL_FILE, PYTHON_EDU_EVAL_ROWS = "train-00000-of-00002.parquet", 8_000
 PYTHON_EDU_EVAL_BLOBS = Path("data/raw_eval/python_edu.parquet")
 CHUNK_ROWS = 250_000  # metadata rows per content file, ~190 MB and ~127M tokens each
@@ -120,15 +120,31 @@ def fetch_blob(client, blob_id):
         return None
 
 
+def python_edu_holdout(metadata_files):
+    """blob_ids never to fetch: all of the reserved last PYTHON_EDU_EVAL_ROWS rows, plus the blob_ids the
+    holdout set used (PYTHON_EDU_EVAL_BLOBS) if that file is here. All 3,893 used blob_ids lie inside the
+    reserved rows, so the reserved rows alone already exclude them; the file is an extra check, not needed.
+    """
+    eval_file = next((p for p in metadata_files if p.name == PYTHON_EDU_EVAL_FILE), None)
+    if eval_file is None:
+        raise SystemExit(f"{PYTHON_EDU_EVAL_FILE} is needed to find the reserved holdout rows")
+    blob_ids = pq.read_table(eval_file, columns=["blob_id"]).column("blob_id").to_pylist()
+    holdout = set(blob_ids[-PYTHON_EDU_EVAL_ROWS:])
+    if PYTHON_EDU_EVAL_BLOBS.exists():
+        used = set(pq.read_table(PYTHON_EDU_EVAL_BLOBS, columns=["ref"]).column("ref").to_pylist())
+        if not used <= holdout:
+            raise SystemExit(f"{PYTHON_EDU_EVAL_BLOBS} has blob_ids outside the reserved rows; check PYTHON_EDU_EVAL_ROWS")
+        holdout |= used
+    return holdout
+
+
 def python_edu_chunks(metadata_files):
     """Plan the content files: (output name, metadata file, rows) per chunk of CHUNK_ROWS rows.
 
     rows are the metadata rows to fetch: not in the holdout, and the first occurrence of each
     blob_id across both metadata files (130 blob_ids repeat).
     """
-    if not PYTHON_EDU_EVAL_BLOBS.exists():
-        raise SystemExit(f"{PYTHON_EDU_EVAL_BLOBS} is needed to exclude the holdout blob_ids; copy it here first")
-    seen = set(pq.read_table(PYTHON_EDU_EVAL_BLOBS, columns=["ref"]).column("ref").to_pylist())
+    seen = python_edu_holdout(metadata_files)
     chunks = []
     for path in metadata_files:
         blob_ids = pq.read_table(path, columns=["blob_id"]).column("blob_id").to_pylist()

@@ -29,6 +29,7 @@ from download import (
     SOURCES,
     list_files,
     python_edu_chunks,
+    python_edu_holdout,
 )
 
 MAX_FAILED_SHARE = 0.001  # blobs S3 couldn't return; the pilot lost 1 in 250,000
@@ -111,7 +112,7 @@ def check_python_edu_content(metadata_files):
     content = RAW / "python_edu" / "content"
     failed_log = RAW / "python_edu" / "failed_blob_ids.txt"
     failed = set(failed_log.read_text().split()) if failed_log.exists() else set()
-    holdout = set(pq.read_table(PYTHON_EDU_EVAL_BLOBS, columns=["ref"]).column("ref").to_pylist())
+    holdout = python_edu_holdout(metadata_files)
     blob_ids = {p: pq.read_table(p, columns=["blob_id"]).column("blob_id").to_pylist() for p in metadata_files}
 
     seen, planned_total, fetched_total, missing_total, paths = set(), 0, 0, 0, []
@@ -175,13 +176,12 @@ def main():
         allowed = set(local)
         if name == "python_edu" and local:
             if not PYTHON_EDU_EVAL_BLOBS.exists():
-                p.append(f"python_edu: {PYTHON_EDU_EVAL_BLOBS} is needed to check the holdout exclusion")
-            else:
-                p4, n4, content_files = check_python_edu_content(local)
-                p += p4
-                notes += n4
-                allowed |= set(content_files) | {RAW / name / "failed_blob_ids.txt", RAW / name / "content" / PILOT_DUPLICATE}
-                local += content_files
+                notes.append(f"python_edu: {PYTHON_EDU_EVAL_BLOBS} not here; holdout checked against the reserved rows only")
+            p4, n4, content_files = check_python_edu_content(local)
+            p += p4
+            notes += n4
+            allowed |= set(content_files) | {RAW / name / "failed_blob_ids.txt", RAW / name / "content" / PILOT_DUPLICATE}
+            local += content_files
         p += check_clean(name, allowed)
 
         # 3. Readable: footers always; whole files with --deep.
