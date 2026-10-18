@@ -1,0 +1,55 @@
+Using device: mps (bf16)
+source            available         needed  coverage
+fineweb_edu     476,605,222    300,000,000      1.59
+python_edu      127,385,812    100,000,000      1.27
+finemath        170,365,485     65,000,000      2.62
+gutenberg       379,939,918     35,000,000     10.86
+Counting available tokens for source: fineweb_edu ━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Counting available tokens for source: python_edu ━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Counting available tokens for source: finemath ━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Counting available tokens for source: gutenberg ━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Model: 40.1M parameters
+60,800 micro-batches covers the mix once; running 200 optimizer steps
+Effective batch: 32 x 1 accum x 256 ctx = 8,192 tokens/step (1,638,400 tokens total)
+  WARNING: 8,192 tokens/step is small. GPT-2 small was pretrained near 500k; gradients this noisy make the loss curve and LR schedule hard to reason about. Raise batch_size or grad_accum_steps.
+Run: fw60_py20_fm13_gb07_s1234
+  {"mix": {"fineweb_edu": 0.6, "python_edu": 0.2, "finemath": 0.13, "gutenberg": 0.07}, "mix_seed": 1234, "mix_tokens": 500000000, "params_M": 40.1, "model": {"vocab_size": 49152, "context_length": 256, "emb_dim": 384, "n_heads": 6, "n_layers": 12, "tie_embeddings": true, "drop_rate": 0.0, "qkv_bias": false, "ffn": "swiglu", "ffn_hidden_dim": null, "norm": "rmsnorm", "rope_base": 10000.0, "delta_backend": "auto", "delta_chunk_size": 64, "gradient_checkpointing": false, "pad_vocab_to_multiple_of": 128}, "train": {"learning_rate": 0.0005, "max_steps": 200, "eval_freq": 10, "eval_iter": 20, "eval_every_tokens": 409600, "sample_freq": 250, "weight_decay": 0.1, "batch_size": 32, "grad_accum_steps": 1, "grad_clip": 1.0, "lr_schedule": "cosine", "warmup_steps": 5, "min_lr_ratio": 0.1, "precision": "bf16", "compile": true, "num_workers": 4, "mix_config": "mix.yaml", "val_instances": 8192}}
+Holdout eval sets: finemath (2,036,328 tokens), fineweb_edu (2,001,952 tokens), gutenberg (2,073,354 tokens), python_edu (2,002,120 tokens), wikipedia_en (2,007,692 tokens); every 409,600 tokens and at the end
+Step 000010/200 (81,600 tokens): Train loss 8.970, Val loss 9.049, micro loss 9.167, lr 4.99e-04, grad norm 1.67, clip frac 1.00, param norm 152.7, 7,374 tok/s
+Step 000020/200 (163,200 tokens): Train loss 7.670, Val loss 7.865, micro loss 7.934, lr 4.93e-04, grad norm 1.13, clip frac 1.00, param norm 154.8, 9,190 tok/s
+Step 000030/200 (244,800 tokens): Train loss 7.251, Val loss 7.447, micro loss 7.502, lr 4.82e-04, grad norm 0.77, clip frac 0.20, param norm 157.4, 9,196 tok/s
+Step 000040/200 (326,400 tokens): Train loss 7.126, Val loss 7.278, micro loss 7.355, lr 4.65e-04, grad norm 0.76, clip frac 0.20, param norm 159.5, 9,191 tok/s
+Step 000050/200 (408,000 tokens): Train loss 7.034, Val loss 7.161, micro loss 7.174, lr 4.43e-04, grad norm 1.10, clip frac 0.20, param norm 161.1, 9,185 tok/s
+[eval 416,160 tokens] bpb/finemath 3.0520  bpb/fineweb_edu 2.1564  bpb/gutenberg 2.7090  bpb/python_edu 3.1980  bpb/wikipedia_en 2.5091  (302s)
+[sample/prose] 'The history of the printing press, and the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the'
+[sample/code] 'def fibonacci(n):\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the'
+[sample/math] 'Solve for x: 3x + 7 = 22.\nSolution:\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the the'
+Step 000060/200 (489,600 tokens): Train loss 6.952, Val loss 7.059, micro loss 6.983, lr 4.17e-04, grad norm 0.57, clip frac 0.10, param norm 162.3, 7,780 tok/s
+Step 000070/200 (571,200 tokens): Train loss 6.874, Val loss 6.970, micro loss 6.968, lr 3.88e-04, grad norm 1.04, clip frac 0.10, param norm 163.2, 8,949 tok/s
+Step 000080/200 (652,800 tokens): Train loss 6.811, Val loss 6.894, micro loss 6.908, lr 3.55e-04, grad norm 0.73, clip frac 0.30, param norm 164.0, 8,942 tok/s
+Step 000090/200 (734,400 tokens): Train loss 6.750, Val loss 6.827, micro loss 6.703, lr 3.20e-04, grad norm 1.10, clip frac 0.40, param norm 164.6, 9,007 tok/s
+Step 000100/200 (816,000 tokens): Train loss 6.698, Val loss 6.774, micro loss 6.892, lr 2.84e-04, grad norm 1.16, clip frac 0.30, param norm 165.2, 8,800 tok/s
+[eval 824,160 tokens] bpb/finemath 2.8779  bpb/fineweb_edu 2.0546  bpb/gutenberg 2.6299  bpb/python_edu 2.9538  bpb/wikipedia_en 2.4048  (358s)
+[sample/prose] 'The history of the printing press.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+[sample/code] 'def fibonacci(n):\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+[sample/math] 'Solve for x: 3x + 7 = 22.\nSolution: 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+Step 000110/200 (897,600 tokens): Train loss 6.642, Val loss 6.714, micro loss 6.673, lr 2.48e-04, grad norm 0.87, clip frac 0.30, param norm 165.7, 4,038 tok/s
+Step 000120/200 (979,200 tokens): Train loss 6.600, Val loss 6.668, micro loss 6.890, lr 2.12e-04, grad norm 0.84, clip frac 0.20, param norm 166.1, 8,907 tok/s
+Step 000130/200 (1,060,800 tokens): Train loss 6.557, Val loss 6.620, micro loss 6.629, lr 1.79e-04, grad norm 0.70, clip frac 0.00, param norm 166.4, 8,326 tok/s
+Step 000140/200 (1,142,400 tokens): Train loss 6.516, Val loss 6.577, micro loss 6.909, lr 1.47e-04, grad norm 0.61, clip frac 0.00, param norm 166.7, 8,304 tok/s
+Step 000150/200 (1,224,000 tokens): Train loss 6.481, Val loss 6.541, micro loss 6.429, lr 1.19e-04, grad norm 0.71, clip frac 0.00, param norm 166.9, 6,989 tok/s
+[eval 1,232,160 tokens] bpb/finemath 2.7898  bpb/fineweb_edu 1.9908  bpb/gutenberg 2.5367  bpb/python_edu 2.8137  bpb/wikipedia_en 2.3415  (367s)
+[sample/prose] 'The history of the printing press.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+[sample/code] 'def fibonacci(n):\n# 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+[sample/math] 'Solve for x: 3x + 7 = 22.\nSolution: 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+Step 000160/200 (1,305,600 tokens): Train loss 6.457, Val loss 6.516, micro loss 6.438, lr 9.51e-05, grad norm 0.64, clip frac 0.00, param norm 167.1, 4,436 tok/s
+Step 000170/200 (1,387,200 tokens): Train loss 6.433, Val loss 6.492, micro loss 6.558, lr 7.58e-05, grad norm 0.74, clip frac 0.10, param norm 167.2, 8,905 tok/s
+Step 000180/200 (1,468,800 tokens): Train loss 6.417, Val loss 6.475, micro loss 6.164, lr 6.16e-05, grad norm 0.76, clip frac 0.00, param norm 167.3, 8,048 tok/s
+Step 000190/200 (1,550,400 tokens): Train loss 6.400, Val loss 6.457, micro loss 6.498, lr 5.29e-05, grad norm 0.66, clip frac 0.00, param norm 167.4, 8,113 tok/s
+Step 000200/200 (1,632,000 tokens): Train loss 6.386, Val loss 6.443, micro loss 6.407, lr 5.00e-05, grad norm 0.71, clip frac 0.00, param norm 167.5, 8,566 tok/s
+Every effort moves you are a the 1000000000000000000000000000000000000000000000
+[eval 1,632,000 tokens] bpb/finemath 2.7455  bpb/fineweb_edu 1.9655  bpb/gutenberg 2.5097  bpb/python_edu 2.7538  bpb/wikipedia_en 2.3143  (369s)
+[sample/prose] 'The history of the printing press.\n-\n-\n-\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+[sample/code] 'def fibonacci(n):\n#\n    self.self.\n\n# 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+[sample/math] 'Solve for x: 3x + 7 = 22.\nSolution: 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+ALLDONE

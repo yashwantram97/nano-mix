@@ -1,0 +1,19 @@
+# Source mixture for the first experiment, built with OLMo-core's source_mixture API (mix.py).
+
+requested_tokens: 500000000
+sequence_length: 256    # small for local Mac runs (was 2048, then 1024)
+global_batch_size: 524288   # 256 * 2048 tokens; must be a multiple of sequence_length
+seed: 1234
+
+tokenizer: HuggingFaceTB/SmolLM2-135M
+dtype: uint16
+tokenized_dir: data/tokenized   # token files: <tokenized_dir>/<source>/*.npy
+work_dir: data/mix              # OLMo-core's cache of instance indices
+
+# Target share of each source (must sum to 1.0). max_repetition_ratio stays at its default (1.0),
+# so no source is repeated; the build fails if a source is too small for its share.
+sources:
+  fineweb_edu: 0.60
+  python_edu: 0.20
+  finemath: 0.13
+  gutenberg: 0.07

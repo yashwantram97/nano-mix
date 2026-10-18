@@ -1,0 +1,44 @@
+{
+  "model": "exports/random_init",
+  "run_name": "random_init",
+  "lm_eval_version": "0.4.13",
+  "settings": {
+    "num_fewshot": 0,
+    "dtype": "float32",
+    "device": "mps",
+    "batch_size": 16,
+    "limit": null
+  },
+  "tasks": {
+    "hellaswag": {
+      "acc": 0.2557259510057757,
+      "acc_norm": 0.2634933280223063,
+      "answer_bpb": 3.4103587096843673,
+      "num_docs": 10042
+    },
+    "piqa": {
+      "acc": 0.5348204570184983,
+      "acc_norm": 0.5206746463547334,
+      "answer_bpb": 3.585055863806694,
+      "num_docs": 1838
+    },
+    "arc_easy": {
+      "acc": 0.24368686868686867,
+      "acc_norm": 0.2563131313131313,
+      "answer_bpb": 2.88413870440091,
+      "num_docs": 2376
+    },
+    "sciq": {
+      "acc": 0.198,
+      "acc_norm": 0.231,
+      "answer_bpb": 2.5006142858990725,
+      "num_docs": 1000
+    },
+    "lambada_openai": {
+      "acc": 0.0,
+      "acc_norm": null,
+      "answer_bpb": 3.21480224682042,
+      "num_docs": 5153
+    }
+  }
+}

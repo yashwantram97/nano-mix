@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments and tool caches
+.venv
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# Data: raw, tokenized, eval sets, mix index files (kept on disk / in S3, never in git)
+data/
+*.tmp
+.partial/
+
+# Model weights: checkpoints and HF exports
+*.pth
+*.pt
+*.safetensors
+exports/
+
+# Benchmark per-sample logs (large); results/*.json and results/summary.md are kept
+results/samples/

@@ -1,0 +1,419 @@
+# Copyright (c) Sebastian Raschka under Apache License 2.0 (see LICENSE.txt).
+# Source for "Build a Large Language Model From Scratch"
+#   - https://www.manning.com/books/build-a-large-language-model-from-scratch
+# Code: https://github.com/rasbt/LLMs-from-scratch
+
+import contextlib
+import dataclasses
+import json
+import math
+import time
+
+import matplotlib.pyplot as plt
+import torch
+from transformers import AutoTokenizer
+
+
+# Import from local files
+from config import MODEL_CONFIG, TRAIN_SETTINGS
+from model import GPTModel, mask_padded_logits
+from dataloader import create_mix_dataloaders
+from eval_bpb import evaluate_bpb, load_eval_sets
+
+# Fixed prompts sampled (greedy, 100 tokens) at every holdout eval.
+SAMPLE_PROMPTS = {
+    "prose": "The history of the printing press",
+    "code": "def fibonacci(n):\n",
+    "math": "Solve for x: 3x + 7 = 22.\nSolution:",
+}
+SOURCE_ABBREV = {"fineweb_edu": "fw", "python_edu": "py", "finemath": "fm", "gutenberg": "gb"}
+
+def generate_text_simple(model, idx, max_new_tokens, context_size):
+    # idx is (B, T) array of indices in the current context
+    for _ in range(max_new_tokens):
+
+        # Crop current context if it exceeds the supported context size
+        # E.g., if LLM supports only 5 tokens, and the context size is 10
+        # then only the last 5 tokens are used as context
+        idx_cond = idx[:, -context_size:]
+
+        # Get the predictions
+        with torch.no_grad():
+            logits = model(idx_cond)
+
+        # Focus only on the last time step
+        # (batch, n_token, vocab_size) becomes (batch, vocab_size)
+        # Padded vocab rows decode to nothing, so they must never be selected.
+        logits = mask_padded_logits(logits[:, -1, :], model.vocab_size)
+
+        # Get the idx of the vocab entry with the highest logits value
+        idx_next = torch.argmax(logits, dim=-1, keepdim=True)  # (batch, 1)
+
+        # Append sampled index to the running sequence
+        idx = torch.cat((idx, idx_next), dim=1)  # (batch, n_tokens+1)
+
+    return idx
+
+def resolve_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def run_name(mix_cfg):
+    """e.g. fw60_py20_fm13_gb07_s1234: mix ratios in percent, then the mix seed."""
+    parts = [f"{SOURCE_ABBREV.get(n, n)}{round(r * 100):02d}" for n, r in mix_cfg["sources"].items()]
+    return "_".join(parts) + f"_s{mix_cfg['seed']}"
+
+
+def resolve_precision(precision, device):
+    """Downgrade to fp32 where bf16 is not actually supported.
+
+    Pre-Ampere CUDA cards have no bf16 path; silently running there would be
+    slower than fp32, not faster.
+    """
+    if precision == "bf16" and device.type == "cuda" and not torch.cuda.is_bf16_supported():
+        print("bf16 unsupported on this GPU (pre-Ampere); falling back to fp32")
+        return "fp32"
+    return precision
+
+
+def autocast_ctx(device, precision):
+    """Context manager wrapping forward + loss.
+
+    bf16 carries fp32's exponent range, so unlike fp16 there are no gradient
+    underflow problems and no GradScaler is needed. Backward is deliberately
+    left outside: autocast covers the forward ops, and autograd then runs each
+    backward in the dtype its forward was recorded in.
+    """
+    if precision == "fp32":
+        return contextlib.nullcontext()
+    return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+
+
+def lr_at_step(step, settings):
+    """Learning rate for a 1-based optimizer step.
+
+    Linear warmup, then cosine decay to ``min_lr_ratio * learning_rate``.
+    A pure function of the step so it can be tested without a training run.
+    """
+    peak = settings.learning_rate
+    warmup = settings.warmup_steps
+
+    if warmup > 0 and step <= warmup:
+        return peak * step / warmup
+    if settings.lr_schedule == "constant":
+        return peak
+
+    progress = (step - warmup) / max(1, settings.max_steps - warmup)
+    progress = min(1.0, max(0.0, progress))
+    floor = peak * settings.min_lr_ratio
+    return floor + 0.5 * (peak - floor) * (1 + math.cos(math.pi * progress))
+
+
+def text_to_token_ids(text, tokenizer):
+    encoded = tokenizer.encode(text, add_special_tokens=False)  # as in tokenize_data.py
+    encoded_tensor = torch.tensor(encoded).unsqueeze(0)  # add batch dimension
+    return encoded_tensor
+
+
+def token_ids_to_text(token_ids, tokenizer):
+    flat = token_ids.squeeze(0)  # remove batch dimension
+    return tokenizer.decode(flat.tolist())
+
+
+def calc_loss_batch(input_batch, target_batch, model, device, amp=None):
+    input_batch = input_batch.to(device, non_blocking=True)
+    target_batch = target_batch.to(device, non_blocking=True)
+    with (amp if amp is not None else contextlib.nullcontext()):
+        logits = model(input_batch)
+        # cross_entropy upcasts to fp32 internally under autocast, so the
+        # softmax and its gradient are not computed in bf16.
+        loss = torch.nn.functional.cross_entropy(
+            logits.flatten(0, 1), target_batch.flatten())
+    return loss
+
+
+def calc_loss_loader(data_loader, model, device, num_batches=None, amp=None):
+    total_loss = 0.
+    if len(data_loader) == 0:
+        return float("nan")
+    elif num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i < num_batches:
+            loss = calc_loss_batch(input_batch, target_batch, model, device, amp)
+            total_loss += loss.item()
+        else:
+            break
+    return total_loss / num_batches
+
+
+def evaluate_model(model, train_loader, val_loader, device, eval_iter, amp=None):
+    model.eval()
+    with torch.no_grad():
+        train_loss = calc_loss_loader(train_loader, model, device, eval_iter, amp)
+        val_loss = calc_loss_loader(val_loader, model, device, eval_iter, amp)
+    model.train()
+    return train_loss, val_loss
+
+
+def generate_and_print_sample(model, tokenizer, device, start_context, amp=None):
+    model.eval()
+    context_size = model.context_length
+    encoded = text_to_token_ids(start_context, tokenizer).to(device)
+    with torch.no_grad(), (amp if amp is not None else contextlib.nullcontext()):
+        token_ids = generate_text_simple(
+            model=model, idx=encoded,
+            max_new_tokens=50, context_size=context_size
+        )
+        decoded_text = token_ids_to_text(token_ids, tokenizer)
+        print(decoded_text.replace("\n", " "))  # Compact print format
+    model.train()
+
+
+def print_holdout_eval(model, eval_sets, tokenizer, device, settings, tokens_seen, amp=None):
+    """Holdout BPB per eval set, then greedy samples from the fixed prompts."""
+    t0 = time.time()
+    bpb = evaluate_bpb(model, eval_sets, model.context_length, settings.batch_size)
+    print(f"[eval {tokens_seen:,} tokens] " + "  ".join(f"bpb/{n} {v:.4f}" for n, v in bpb.items())
+          + f"  ({time.time() - t0:.0f}s)")
+    model.eval()
+    for name, prompt in SAMPLE_PROMPTS.items():
+        encoded = text_to_token_ids(prompt, tokenizer).to(device)
+        with torch.no_grad(), (amp if amp is not None else contextlib.nullcontext()):
+            out = generate_text_simple(model, encoded, max_new_tokens=100,
+                                       context_size=model.context_length)
+        print(f"[sample/{name}] {token_ids_to_text(out, tokenizer)!r}")
+    model.train()
+
+
+def train_model_simple(model, train_loader, val_loader, optimizer, device, settings,
+                       start_context, tokenizer, amp=None, eval_sets=None):
+    """Train for ``settings.max_steps`` optimizer steps.
+
+    One optimizer step consumes ``grad_accum_steps`` micro-batches. Their
+    gradients sum into ``.grad``, so the update is the same one a single batch
+    of ``batch_size * grad_accum_steps`` would have produced -- at the memory
+    cost of one micro-batch, and for the same total FLOPs.
+    """
+    train_losses, val_losses, track_steps, track_tokens_seen = [], [], [], []
+    tokens_seen = 0
+
+    max_steps = settings.max_steps
+    accum_steps = settings.grad_accum_steps
+    eval_freq = settings.eval_freq
+    sample_freq = settings.sample_freq or eval_freq * 10
+    clip = settings.grad_clip
+
+    next_eval = settings.eval_every_tokens
+    interval_tokens, interval_steps, interval_clipped = 0, 0, 0
+    interval_start = time.time()
+
+    model.train()
+    # One pass: main() checks the mix holds max_steps of batches, so this never
+    # runs out and no instance is seen twice.
+    batches = iter(train_loader)
+    optimizer.zero_grad(set_to_none=True)
+
+    for step in range(1, max_steps + 1):
+        # The schedule is indexed by optimizer step, not micro-batch.
+        lr = lr_at_step(step, settings)
+        for group in optimizer.param_groups:
+            group["lr"] = lr
+
+        running_loss = 0.0
+        for _ in range(accum_steps):
+            input_batch, target_batch = next(batches)
+            loss = calc_loss_batch(input_batch, target_batch, model, device, amp)
+            # Divide so the accumulated gradient is the *mean* over the full
+            # effective batch. Omitting this scales gradients by accum_steps,
+            # which silently acts like an accum_steps-times larger learning
+            # rate -- it does not error, it just diverges.
+            (loss / accum_steps).backward()
+            running_loss += loss.item() / accum_steps
+            tokens_seen += input_batch.numel()
+            interval_tokens += input_batch.numel()
+
+        # Clip once, on the accumulated (true full-batch) gradient. clip_grad_norm_ returns
+        # the norm before clipping; with clipping off, an infinite max_norm only measures it.
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip or float("inf")).item()
+        interval_steps += 1
+        interval_clipped += bool(clip) and grad_norm > clip
+
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+        if step % eval_freq == 0 or step == max_steps:
+            tokens_per_sec = interval_tokens / (time.time() - interval_start)
+            train_loss, val_loss = evaluate_model(
+                model, train_loader, val_loader, device, settings.eval_iter, amp)
+            train_losses.append(train_loss)
+            val_losses.append(val_loss)
+            track_steps.append(step)
+            track_tokens_seen.append(tokens_seen)
+            with torch.no_grad():
+                param_norm = torch.linalg.vector_norm(
+                    torch.stack([p.norm() for p in model.parameters()])).item()
+            print(f"Step {step:06d}/{max_steps} "
+                  f"({tokens_seen:,} tokens): "
+                  f"Train loss {train_loss:.3f}, Val loss {val_loss:.3f}, "
+                  f"micro loss {running_loss:.3f}, "
+                  f"lr {lr:.2e}, grad norm {grad_norm:.2f}, "
+                  f"clip frac {interval_clipped / interval_steps:.2f}, "
+                  f"param norm {param_norm:.1f}, "
+                  f"{tokens_per_sec:,.0f} tok/s")
+            interval_tokens, interval_steps, interval_clipped = 0, 0, 0
+            interval_start = time.time()
+
+        paused = time.time()
+        if step % sample_freq == 0 or step == max_steps:
+            generate_and_print_sample(model, tokenizer, device, start_context, amp)
+
+        if eval_sets and (tokens_seen >= next_eval or step == max_steps):
+            print_holdout_eval(model, eval_sets, tokenizer, device, settings, tokens_seen, amp)
+            while next_eval <= tokens_seen:
+                next_eval += settings.eval_every_tokens
+        # tok/s measures training only, not the sampling and evals above.
+        interval_start += time.time() - paused
+
+    return train_losses, val_losses, track_tokens_seen, track_steps
+
+
+def plot_losses(steps_seen, tokens_seen, train_losses, val_losses):
+    fig, ax1 = plt.subplots()
+
+    # Plot training and validation loss against steps
+    ax1.plot(steps_seen, train_losses, label="Training loss")
+    ax1.plot(steps_seen, val_losses, linestyle="-.", label="Validation loss")
+    ax1.set_xlabel("Steps")
+    ax1.set_ylabel("Loss")
+    ax1.legend(loc="upper right")
+
+    # Create a second x-axis for tokens seen
+    ax2 = ax1.twiny()  # Create a second x-axis that shares the same y-axis
+    ax2.plot(tokens_seen, train_losses, alpha=0)  # Invisible plot for aligning ticks
+    ax2.set_xlabel("Tokens seen")
+
+    fig.tight_layout()  # Adjust layout to make room
+    # plt.show()
+
+
+def main(gpt_config, settings):
+
+    torch.manual_seed(123)
+    device = resolve_device()
+
+    precision = resolve_precision(settings.precision, device)
+    amp = autocast_ctx(device, precision)
+    print(f"Using device: {device} ({precision})")
+
+    if device.type == "cuda":
+        # TF32 for the fp32 ops autocast leaves alone; negligible accuracy
+        # cost at this scale, meaningful speedup on the matmuls.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+    ##############################
+    # Initialize model
+    ##############################
+
+    model = GPTModel(gpt_config)
+    model.to(device)  # no assignment model = model.to(device) necessary for nn.Module classes
+    if settings.compile and device.type == "cuda":
+        # In place (Module.compile, not torch.compile(model)), so state_dict keys,
+        # model.context_length and the saved model.pth stay unchanged.
+        model.compile()
+        print("Compiling model (first step is slow)")
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=settings.learning_rate, weight_decay=settings.weight_decay
+    )
+
+    ##############################
+    # Set up dataloaders
+    ##############################
+
+    # The OLMo-core mix from mix.yaml, built the same way as mix.py / verify_mix.py.
+    train_loader, val_loader, mix_cfg = create_mix_dataloaders(
+        settings.mix_config,
+        batch_size=settings.batch_size,
+        val_instances=settings.val_instances,
+        num_workers=settings.num_workers,
+        pin_memory=device.type == "cuda",
+    )
+    if mix_cfg["sequence_length"] != gpt_config.context_length:
+        raise SystemExit(f"mix sequence_length {mix_cfg['sequence_length']} != "
+                         f"model context_length {gpt_config.context_length}")
+    if settings.max_steps * settings.grad_accum_steps > len(train_loader):
+        raise SystemExit(f"{settings.max_steps} steps x {settings.grad_accum_steps} accum needs "
+                         f"{settings.max_steps * settings.grad_accum_steps:,} micro-batches; the mix "
+                         f"has {len(train_loader):,}. Lower max_steps (no repetition).")
+
+    ##############################
+    # Train model
+    ##############################
+
+    tokenizer = AutoTokenizer.from_pretrained(mix_cfg["tokenizer"])
+    if len(tokenizer) != gpt_config.vocab_size:
+        raise SystemExit(f"tokenizer has {len(tokenizer)} tokens, model vocab_size is {gpt_config.vocab_size}")
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model: {n_params / 1e6:.1f}M parameters")
+
+    tokens_per_step = settings.tokens_per_optimizer_step(gpt_config.context_length)
+    print(f"{len(train_loader):,} micro-batches covers the mix once; "
+          f"running {settings.max_steps:,} optimizer steps")
+    print(f"Effective batch: {settings.batch_size} x {settings.grad_accum_steps} accum "
+          f"x {gpt_config.context_length} ctx = {tokens_per_step:,} tokens/step "
+          f"({tokens_per_step * settings.max_steps:,} tokens total)")
+    if tokens_per_step < 50_000:
+        print(f"  WARNING: {tokens_per_step:,} tokens/step is small. GPT-2 small was "
+              f"pretrained near 500k; gradients this noisy make the loss curve and "
+              f"LR schedule hard to reason about. Raise batch_size or "
+              f"grad_accum_steps.")
+
+    # The run config, printed once (mix ratios, seed, model size, LR, ...).
+    print(f"Run: {run_name(mix_cfg)}")
+    print("  " + json.dumps({
+        "mix": mix_cfg["sources"], "mix_seed": mix_cfg["seed"],
+        "mix_tokens": mix_cfg["requested_tokens"], "params_M": round(n_params / 1e6, 1),
+        "model": dataclasses.asdict(gpt_config), "train": dataclasses.asdict(settings),
+    }))
+
+    eval_sets = load_eval_sets()
+    print(f"Holdout eval sets: {', '.join(f'{n} ({len(t):,} tokens)' for n, t in eval_sets.items())}; "
+          f"every {settings.eval_every_tokens:,} tokens and at the end")
+
+    train_losses, val_losses, tokens_seen, steps_seen = train_model_simple(
+        model, train_loader, val_loader, optimizer, device, settings,
+        start_context="Every effort moves you", tokenizer=tokenizer, amp=amp,
+        eval_sets=eval_sets,
+    )
+
+    return train_losses, val_losses, tokens_seen, steps_seen, model
+
+
+if __name__ == "__main__":
+
+    ###########################
+    # Initiate training
+    ###########################
+
+    train_losses, val_losses, tokens_seen, steps_seen, model = main(MODEL_CONFIG, TRAIN_SETTINGS)
+
+    ###########################
+    # After training
+    ###########################
+
+    # Plot results
+    plot_losses(steps_seen, tokens_seen, train_losses, val_losses)
+    plt.savefig("loss.pdf")
+
+    # Save and load model
+    torch.save(model.state_dict(), "model.pth")
+    model = GPTModel(MODEL_CONFIG)
+    model.load_state_dict(torch.load("model.pth", weights_only=True))
+

@@ -1,0 +1,44 @@
+{
+  "model": "gpt2",
+  "run_name": "gpt2",
+  "lm_eval_version": "0.4.13",
+  "settings": {
+    "num_fewshot": 0,
+    "dtype": "float32",
+    "device": "mps",
+    "batch_size": 16,
+    "limit": null
+  },
+  "tasks": {
+    "hellaswag": {
+      "acc": 0.2891854212308305,
+      "acc_norm": 0.31139215295757816,
+      "answer_bpb": 0.9641445544590062,
+      "num_docs": 10042
+    },
+    "piqa": {
+      "acc": 0.6289445048966268,
+      "acc_norm": 0.6251360174102285,
+      "answer_bpb": 1.1232469612173233,
+      "num_docs": 1838
+    },
+    "arc_easy": {
+      "acc": 0.43813131313131315,
+      "acc_norm": 0.3947811447811448,
+      "answer_bpb": 1.247662988468879,
+      "num_docs": 2376
+    },
+    "sciq": {
+      "acc": 0.752,
+      "acc_norm": 0.644,
+      "answer_bpb": 1.404845678667564,
+      "num_docs": 1000
+    },
+    "lambada_openai": {
+      "acc": 0.32563555210556955,
+      "acc_norm": null,
+      "answer_bpb": 0.7969725944127276,
+      "num_docs": 5153
+    }
+  }
+}

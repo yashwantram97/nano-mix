@@ -1,0 +1,19 @@
+[project]
+name = "data-mix"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ai2-olmo-core>=3.0.0",
+    "boto3>=1.43.110",
+    "hf-xet>=1.7.0",
+    "huggingface-hub>=1.0,<2",
+    "lm-eval[hf]==0.4.13",
+    "matplotlib>=3.11.1",
+    "numpy>=2.4.6",
+    "pyarrow>=26.0.0",
+    "pyyaml>=6.0.3",
+    "tqdm>=4.70.1",
+    "transformers>=5.19.0",
+]

@@ -1,0 +1,44 @@
+{
+  "model": "exports/fw60_py20_fm13_gb07_s1234",
+  "run_name": "fw60_py20_fm13_gb07_s1234",
+  "lm_eval_version": "0.4.13",
+  "settings": {
+    "num_fewshot": 0,
+    "dtype": "float32",
+    "device": "mps",
+    "batch_size": 16,
+    "limit": null
+  },
+  "tasks": {
+    "hellaswag": {
+      "acc": 0.26010754829715194,
+      "acc_norm": 0.26030671181039633,
+      "answer_bpb": 1.8954889668191406,
+      "num_docs": 10042
+    },
+    "piqa": {
+      "acc": 0.515233949945593,
+      "acc_norm": 0.5038084874863983,
+      "answer_bpb": 2.2006100923378797,
+      "num_docs": 1838
+    },
+    "arc_easy": {
+      "acc": 0.27230639730639733,
+      "acc_norm": 0.2798821548821549,
+      "answer_bpb": 1.912420187500554,
+      "num_docs": 2376
+    },
+    "sciq": {
+      "acc": 0.223,
+      "acc_norm": 0.252,
+      "answer_bpb": 2.3219217083214514,
+      "num_docs": 1000
+    },
+    "lambada_openai": {
+      "acc": 0.0,
+      "acc_norm": null,
+      "answer_bpb": 3.0746711322285756,
+      "num_docs": 5153
+    }
+  }
+}
