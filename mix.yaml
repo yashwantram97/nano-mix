@@ -1,8 +1,8 @@
-# Source mixture for the first experiment, built with OLMo-core's source_mixture API (mix.py).
+# Source mixture for the 124M run, built with OLMo-core's source_mixture API (mix.py).
 
-requested_tokens: 500000000
-sequence_length: 256    # small for local Mac runs (was 2048, then 1024)
-global_batch_size: 524288   # 256 * 2048 tokens; must be a multiple of sequence_length
+requested_tokens: 5050000000   # 5B to train on + ~1% for val_instances (8192 x 1024) and batch rounding
+sequence_length: 1024    # = config.py context_length (train.py checks); was 256 for the 40M Mac pilot
+global_batch_size: 524288   # 512 * 1024 tokens; must be a multiple of sequence_length
 seed: 1234
 
 tokenizer: HuggingFaceTB/SmolLM2-135M

@@ -31,12 +31,18 @@ in a `SourceMixtureList`, and `SourceMixtureDatasetConfig.build()` takes `npdtyp
 
 Read from the installed source (`olmo_core/data/source_mixture.py`, `numpy_dataset.py`):
 
-- **Contiguous reads.** Each instance is a contiguous 256-token window from the start of a file.
-  A file allocated N instances contributes its first N × 256 tokens. Instances cross document
-  boundaries, with EOS between documents. No document is cut short and nothing is repeated.
+- **The same share of every file.** A source's take ratio is needed ÷ available tokens, and every
+  file in the source gives that fraction of its tokens (rounded down to whole instances, then topped
+  up to whole batches with Hamilton's method). It does not take whole files in order. So the files in
+  the folder decide which documents are used: all 49 fineweb_edu shards give ~20% of each, while 10
+  shards would give ~100% of fewer files.
+- **Contiguous reads.** Each instance is a contiguous `sequence_length`-token window (1024) from the
+  start of a file. A file allocated N instances contributes its first N × 1024 tokens. Instances cross
+  document boundaries, with EOS between documents. Nothing is repeated; the last document of each
+  file's share is cut where the share ends, and the rest of the file is unused.
 - **`prepare()` writes index files that are never read.** They store one sample per document,
-  truncated to 256 tokens and drawn with replacement, in `work_dir`. Nothing in the dataset reads
-  them back; the code that did is commented out.
+  truncated to `sequence_length` tokens and drawn with replacement, in `work_dir`. Nothing in the
+  dataset reads them back; the code that did is commented out.
 - **The seed doesn't change the content.** Which tokens end up in the mix depends only on the file
   sizes. Order is shuffled later, by the data loader at training time.
 - **Token counts come from file sizes** (bytes / 2 for uint16), so the files must have no `.npy`
@@ -48,9 +54,9 @@ Every setting lives here; `mix.py` has no numbers hard-coded.
 
 | key | value | meaning |
 |---|---|---|
-| `requested_tokens` | 500,000,000 | target mix size; the result is rounded up to whole batches |
-| `sequence_length` | 256 | tokens per instance (was 2048, then 1024; lowered for local Mac runs) |
-| `global_batch_size` | 524,288 | 256 × 2048 tokens; must be a multiple of `sequence_length` |
+| `requested_tokens` | 5,050,000,000 | 5B to train on + ~1% for `val_instances` and batch rounding; the result is rounded up to whole batches (was 500M for the 40M pilot) |
+| `sequence_length` | 1024 | tokens per instance; must equal `config.py` `context_length` (was 256 for the 40M Mac pilot) |
+| `global_batch_size` | 524,288 | 512 × 1024 tokens; must be a multiple of `sequence_length` |
 | `seed` | 1234 | passed to OLMo-core (see above) |
 | `tokenizer` | `HuggingFaceTB/SmolLM2-135M` | fixed in `CLAUDE.md` |
 | `dtype` | `uint16` | set explicitly instead of guessed from the vocab size |
@@ -107,7 +113,7 @@ for the determinism check.
 
 ### `tokens_per_source(dataset)`
 
-`dataset.offsets` holds each file's (start, end) instance range, so (end − start) × 256 is the
+`dataset.offsets` holds each file's (start, end) instance range, so (end − start) × `sequence_length` is the
 tokens taken from that file. The file's parent folder name identifies its source. Used for the ratio
 and no-repetition checks.
 
@@ -126,36 +132,38 @@ and no-repetition checks.
 
 Worked out by hand from OLMo-core's allocation code; not from a run.
 
-**Total.** Steps = ⌈500,000,000 / 524,288⌉ = 954, and each step is 2,048 instances:
-954 × 2,048 = **1,953,792 instances** = **500,170,752 tokens**, 0.03% over the request.
+**Total.** Steps = ⌈5,050,000,000 / 524,288⌉ = 9,633, and each step is 512 instances:
+9,633 × 512 = **4,932,096 instances** = **5,050,466,304 tokens**, 0.009% over the request.
+`train.py` holds out `val_instances` (8,192 × 1024 = 8.4M tokens), leaving ~5.04B to train on.
 
-**Per source.** Each source first gets ⌊ratio × 500M / 256⌋ instances, which totals 1,953,124. The
-668 missing instances are spread evenly (167 per source).
+**Per source.** The shares below are the targets; the exact instance counts depend on every file's
+size (each file is rounded down to whole instances, then Hamilton's method adds the remainder),
+so expect them to differ by a few hundred instances. The last column is approximate, from the
+tokenized sizes estimated before tokenizing.
 
-| source | instances | tokens | share | target |
+| source | ~instances | ~tokens | target | ~share of each file used |
 |---|---|---|---|---|
-| fineweb_edu | 1,172,042 | 300,042,752 | 0.5999 | 0.60 |
-| python_edu | 390,792 | 100,042,752 | 0.2000 | 0.20 |
-| finemath | 254,073 | 65,042,688 | 0.1300 | 0.13 |
-| gutenberg | 136,885 | 35,042,560 | 0.0701 | 0.07 |
-| **total** | **1,953,792** | **500,170,752** | | |
-
-All four are within ±0.5% of target.
+| fineweb_edu | 2,959,258 | 3.030B | 0.60 | ~20% (of ~15.4B) |
+| python_edu | 986,419 | 1.010B | 0.20 | ~26% (of ~3.9B) |
+| finemath | 641,172 | 0.657B | 0.13 | ~6% (of ~10.9B) |
+| gutenberg | 345,247 | 0.354B | 0.07 | ~7% (of ~5.1B) |
+| **total** | **4,932,096** | **5.050B** | | |
 
 ## Running it
 
-After the python_edu download (250,000 files) finishes:
+The mix needs all of `data/tokenized/` (~71 GB) on disk: OLMo-core sizes every file, even though
+training reads only each file's first part. Run it on a small CPU instance in us-east-1 (S3 → EC2 in
+the same region is free); the GPU box rebuilds `data/mix/` from `mix.yaml` itself, because `mix.py`
+uses absolute paths.
 
 ```bash
-uv sync                                     # once: installs OLMo-core and torch (done 2026-10-09)
-rm data/tokenized/python_edu/pilot-5000.npy data/tokenized/python_edu/meta.json
-uv run python tokenize_data.py --source python_edu
-uv run python verify_tokenized.py
-uv run python mix.py
+aws s3 sync s3://nano-mix/tokenized/ data/tokenized/
+uv run python -u mix.py 2>&1 | tee logs/mix.log
+uv run python -u verify_mix.py 2>&1 | tee logs/verify_mix.log
 ```
 
-Delete the old `pilot-5000.npy` first. It holds the same first 5,000 documents as the new file, and
-`check_coverage` will stop if it's still there.
+`check_coverage` stops if a folder's `.npy` files don't match its `meta.json`, or if an eval-only
+shard (the list in `download.py`, plus `data/eval/<name>.json` where present) is in the mix.
 
 ## Checking the mix: `verify_mix.py`
 
@@ -165,16 +173,16 @@ uv run python verify_mix.py [--config mix.yaml]
 
 Builds the mix with the same `mix.yaml` and `build_dataset()` as `mix.py`, then checks:
 
-1. **Total size**: instances × 256 equals `requested_tokens` rounded up to whole batches
-   (500,170,752), and is at least `requested_tokens`.
+1. **Total size**: instances × `sequence_length` equals `requested_tokens` rounded up to whole
+   batches (5,050,466,304), and is at least `requested_tokens`.
 2. **Ratios**: each source's actual share is within ±0.5 percentage points of its target.
 3. **No repetition**: no file appears twice, and no file gives more tokens than it has.
 4. **Content**: for 2 random instances per source, checks the instance equals the expected slice of
    its source file, prints the first 300 decoded characters and its EOS count, and checks that
    documents end (EOS) inside the part of each source the mix uses.
 5. **Determinism**: builds a second time and compares files, offsets and the first 10 instances.
-6. **Shape**: reads every instance through the dataset; each must be exactly 256 tokens with all
-   IDs below the vocab size.
+6. **Shape**: reads every instance through the dataset; each must be exactly 1024 tokens with all
+   IDs below the vocab size. With ~4.9M instances this is the slow check (several minutes).
 
 It ends with a table (source, target share, actual share, tokens used, tokens available, PASS/FAIL)
 and exits with an error if any check fails.

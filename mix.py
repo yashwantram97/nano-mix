@@ -18,6 +18,8 @@ from olmo_core.data.source_mixture import (
     SourceMixtureList,
 )
 
+from download import EVAL_ONLY
+
 
 def load_config(path):
     cfg = yaml.safe_load(Path(path).read_text())
@@ -44,14 +46,16 @@ def check_coverage(cfg):
         on_disk = sorted(p.name for p in source_dir(cfg, name).glob("*.npy"))
         if on_disk != sorted(f["file"] for f in meta["files"]):
             raise SystemExit(f"{name}: .npy files on disk {on_disk} don't match meta.json")
-        # Shards reserved for the holdout set data/eval/<name>.json (make_eval_sets.py) must never be
-        # trained on. (python_edu's holdout is a set of blob_ids, not a whole shard; see CLAUDE.md.)
+        # Shards reserved for the holdout set must never be trained on: the fixed list in download.py,
+        # plus data/eval/<name>.json (make_eval_sets.py) where it exists. (python_edu's holdout is a set
+        # of blob_ids, not a whole shard; download.py never fetches them. See CLAUDE.md.)
+        eval_shards = {EVAL_ONLY[name]} if name in EVAL_ONLY else set()
         eval_meta = Path("data/eval") / f"{name}.json"
         if eval_meta.exists():
-            eval_shards = {Path(s["path"]).name for s in json.loads(eval_meta.read_text())["source_files"]
-                           if s["ref_kind"] == "row"}
-            if eval_shards & {Path(f["raw"]).name for f in meta["files"]}:
-                raise SystemExit(f"{name}: {eval_shards} is reserved for the holdout set; remove it from the mix")
+            eval_shards |= {Path(s["path"]).name for s in json.loads(eval_meta.read_text())["source_files"]
+                            if s["ref_kind"] == "row"}
+        if eval_shards & {Path(f["raw"]).name for f in meta["files"]}:
+            raise SystemExit(f"{name}: {eval_shards} is reserved for the holdout set; remove it from the mix")
 
         needed = int(cfg["requested_tokens"] * ratio)
         coverage = meta["num_tokens"] / needed
