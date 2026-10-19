@@ -28,7 +28,7 @@ import torch
 # how the weights are updated, only logging, saving and speed.
 RESUME_SAFE = {"log_freq", "eval_freq", "eval_iter", "eval_every_tokens", "sample_freq", "compile",
                "num_workers", "peak_tflops", "metrics_dir", "checkpoint_minutes", "checkpoint_dir",
-               "checkpoint_s3", "watch_spot"}
+               "checkpoint_s3", "watch_spot", "wandb_project", "wandb_entity"}
 # mix.yaml keys that must match on --resume (they decide the instances and their order).
 MIX_KEYS = ("requested_tokens", "sequence_length", "global_batch_size", "seed", "tokenizer", "sources")
 

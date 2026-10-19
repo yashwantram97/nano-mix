@@ -24,6 +24,9 @@ data/
 *.safetensors
 exports/
 checkpoints/
+wandb/
 
 # Benchmark per-sample logs (large); results/*.json and results/summary.md are kept
 results/samples/
+
+.env

@@ -69,7 +69,8 @@ uv run python eval_bpb.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124
 # 200-step sanity run of the 124M config, evaluating every 50 steps (8 x 1024 tokens/step):
 HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG_124M, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=409_600), tag='smoke')"
 # The 5B run on an H100 (tmux): checkpoints every 30 min to checkpoints/<run_id>/ckpt.pt and
-# s3://nano-mix/checkpoints/<run_id>/, and on Ctrl-C / SIGTERM / spot notice. Resume with the same flags:
+# s3://nano-mix/checkpoints/<run_id>/, and on Ctrl-C / SIGTERM / spot notice. Resume with the same flags.
+# Logs to W&B project nano-mix: needs WANDB_API_KEY=<key> in .env (gitignored) on the box.
 uv run python -u train.py --model 124m --preset h100 2>&1 | tee -a logs/train_124m.log
 uv run python -u train.py --model 124m --preset h100 --resume checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt 2>&1 | tee -a logs/train_124m.log
 uv run python -u train.py --model 124m --preset h100 --max-steps 200 --tag smoke   # H100 smoke run

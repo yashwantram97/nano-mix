@@ -153,7 +153,10 @@ terminal.
 - **Val line** (every `eval_freq` steps): train loss (mean since the last val line, no extra forward
   passes), val loss on `eval_iter` fixed val batches loaded once at the start, and param norm.
 - **Metrics file**: every train, val and BPB record is appended as one JSON line to
-  `logs/<run_name>.jsonl` (`metrics_dir`), after a `run` record with the full config.
+  `logs/<run_name>.jsonl` (`metrics_dir`), after a `run` record with the full config. With
+  `wandb_project` set (H100 preset: `nano-mix`) they also go to W&B, with stdout and GPU stats;
+  the key is `WANDB_API_KEY` from `.env`. Alerts (email / Slack, per W&B user settings) fire on a
+  non-finite loss, which also stops the run without saving, and on tok/s under half the best.
 - **Run name and config**: printed once at the start, e.g. `Run: fw60_py20_fm13_gb07_s1234_124m`
   (mix ratios in percent, the mix seed, the model size), followed by the mix ratios, seed, requested
   tokens, model size and the full model and training settings as JSON.
@@ -285,7 +288,8 @@ uv run python eval_bpb.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124
 # 200-step sanity run, holdout eval every ~50 steps (run id ..._124m_smoke)
 HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG_124M, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=409_600), tag='smoke')"
 # The 5B run on an H100 (tmux): checkpoints every 30 min to checkpoints/<run_id>/ckpt.pt and
-# s3://nano-mix/checkpoints/<run_id>/, and on Ctrl-C / SIGTERM / spot notice. Resume with the same flags:
+# s3://nano-mix/checkpoints/<run_id>/, and on Ctrl-C / SIGTERM / spot notice. Resume with the same flags.
+# Logs to W&B project nano-mix: needs WANDB_API_KEY=<key> in .env (gitignored) on the box.
 uv run python -u train.py --model 124m --preset h100 2>&1 | tee -a logs/train_124m.log
 uv run python -u train.py --model 124m --preset h100 --resume checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt 2>&1 | tee -a logs/train_124m.log
 uv run python -u train.py --model 124m --preset h100 --max-steps 200 --tag smoke   # H100 smoke run

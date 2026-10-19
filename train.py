@@ -7,11 +7,13 @@ import contextlib
 import dataclasses
 import json
 import math
+import os
 import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
+from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
 
@@ -194,15 +196,51 @@ def param_groups(model, weight_decay):
 
 
 class MetricsLog:
-    """Appends one JSON record per line to path and flushes, so a killed run keeps its metrics."""
+    """Appends one JSON record per line to path and flushes, so a killed run keeps its metrics.
 
-    def __init__(self, path):
+    With a W&B run, train / val / BPB records are also logged there (as train/loss, val/val_loss,
+    bpb/bpb/fineweb_edu, ... against the optimizer step). The JSONL file stays the full record.
+    """
+
+    def __init__(self, path, wandb_run=None, run_id="run"):
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.run_id = run_id
         self.file = open(path, "a")
+        self.wandb_run = wandb_run
 
     def __call__(self, kind, **fields):
         self.file.write(json.dumps({"type": kind, "time": round(time.time(), 1), **fields}) + "\n")
         self.file.flush()
+        if self.wandb_run is not None and kind in ("train", "val", "bpb"):
+            # W&B drops points at a step below its latest, so after a resume the steps redone
+            # since the checkpoint keep their first values.
+            self.wandb_run.log({f"{kind}/{k}": v for k, v in fields.items()
+                                if k != "step" and isinstance(v, (int, float))}, step=fields["step"])
+
+    def alert(self, title, text):
+        """Print, and send a W&B alert (email / Slack, as set in W&B's user settings), at most
+        one per title every 30 min."""
+        print(f"ALERT: {title}: {text}")
+        if self.wandb_run is not None:
+            import wandb
+            self.wandb_run.alert(title=title, text=text, level=wandb.AlertLevel.WARN, wait_duration=1800)
+
+    def finish(self):
+        self.file.close()
+        if self.wandb_run is not None:
+            self.wandb_run.finish()
+
+
+def init_wandb(settings, name, wandb_id, config):
+    """A W&B run for this run id (resumed when wandb_id is given), or None if wandb_project is unset."""
+    if not settings.wandb_project:
+        return None
+    if not os.environ.get("WANDB_API_KEY"):
+        raise SystemExit("wandb_project is set but WANDB_API_KEY isn't: put it in .env (or the "
+                         "environment), or set wandb_project=None to log to the JSONL file only")
+    import wandb
+    return wandb.init(project=settings.wandb_project, entity=settings.wandb_entity, name=name,
+                      id=wandb_id, resume="allow" if wandb_id else None, config=config)
 
 
 def generate_and_print_sample(model, tokenizer, device, start_context, amp=None):
@@ -279,6 +317,8 @@ def train_model_simple(model, train_model, train_loader, val_batches, optimizer,
     log_tokens, log_steps = 0, 0
     train_loss_sum, train_loss_steps = 0.0, 0
     log_start = time.time()
+    # Slowdown alert: tok/s under half the best line so far, ignoring the first lines (compiling).
+    best_tokens_per_sec, log_lines = 0.0, 0
 
     train_model.train()
     # One pass: main() checks the mix holds max_steps of batches, so this never
@@ -337,6 +377,19 @@ def train_model_simple(model, train_model, train_loader, val_batches, optimizer,
             print(line)
             if metrics:
                 metrics("train", **record)
+            if not math.isfinite(loss_mean):
+                # Stop without saving: the newest weights are likely broken, and a save would
+                # push the last good checkpoint out to ckpt_prev.pt.
+                if metrics:
+                    metrics.alert("Loss is not finite", f"{metrics.run_id}: loss {loss_mean} at step {step}; "
+                                  "stopped without saving a checkpoint")
+                raise SystemExit(f"Loss is {loss_mean} at step {step}; stopped. Resume from the last checkpoint "
+                                 "(lower the learning rate or check the data).")
+            log_lines += 1
+            if log_lines > 3 and tokens_per_sec < 0.5 * best_tokens_per_sec and metrics:
+                metrics.alert("Training slowed down", f"{metrics.run_id}: {tokens_per_sec:,.0f} tok/s at step "
+                              f"{step}, best so far {best_tokens_per_sec:,.0f}")
+            best_tokens_per_sec = max(best_tokens_per_sec, tokens_per_sec if log_lines > 1 else 0.0)
             train_loss_sum += loss_mean * log_steps
             train_loss_steps += log_steps
             for total in (log_loss, log_grad_norm, log_clipped):
@@ -412,6 +465,7 @@ def main(gpt_config, settings, resume=None, tag=None):
     metrics to <metrics_dir>/<run_id>.jsonl. A new run refuses to start over an existing one.
     """
 
+    load_dotenv()  # WANDB_API_KEY etc. from .env (gitignored); doesn't override the environment
     torch.manual_seed(123)
     device = resolve_device()
 
@@ -537,7 +591,13 @@ def main(gpt_config, settings, resume=None, tag=None):
     else:
         print("MFU: GPU peak unknown (set peak_tflops), not printed")
 
-    metrics = MetricsLog(metrics_path)
+    wandb_run = init_wandb(settings, name, ckpt.get("wandb_id") if ckpt else None, {
+        "run_id": name, "n_params": n_params, "flops_per_token": flops_per_token,
+        "peak_flops": peak_flops, "model": dataclasses.asdict(gpt_config),
+        "train": dataclasses.asdict(settings), "mix": mix_cfg})
+    if wandb_run is not None:
+        print(f"W&B: {wandb_run.url}")
+    metrics = MetricsLog(metrics_path, wandb_run, run_id=name)
     metrics("resume" if ckpt else "run", run_name=name, step=start_step, n_params=n_params,
             flops_per_token=flops_per_token, peak_flops=peak_flops,
             model=dataclasses.asdict(gpt_config), train=dataclasses.asdict(settings), mix=mix_cfg)
@@ -557,6 +617,7 @@ def main(gpt_config, settings, resume=None, tag=None):
                     "cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else None},
             "history": history, "model_config": dataclasses.asdict(gpt_config),
             "train_settings": dataclasses.asdict(settings), "mix": mix_cfg,
+            "wandb_id": wandb_run.id if wandb_run is not None else None,
         }
 
     train_losses, val_losses, tokens_seen, steps_seen, finished = train_model_simple(
@@ -567,6 +628,7 @@ def main(gpt_config, settings, resume=None, tag=None):
         tokens_seen=ckpt["tokens_seen"] if ckpt else 0, history=ckpt["history"] if ckpt else None,
         checkpointer=checkpointer, make_state=make_state, stop=StopRequest(settings.watch_spot),
     )
+    metrics.finish()
     if finished:
         print(f"Done. Final checkpoint: {checkpointer.path} "
               f"(weights: torch.load(path, weights_only=True)['model'])")

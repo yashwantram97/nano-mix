@@ -207,6 +207,12 @@ class TrainSettings:
     checkpoint_s3: str | None = None
     watch_spot: bool = True
 
+    # Weights & Biases: with wandb_project set, every train / val / BPB record also goes to W&B
+    # (plus stdout and GPU stats), and alerts fire on a non-finite loss or a large tok/s drop.
+    # The key comes from WANDB_API_KEY (environment or .env). None: no W&B, JSONL only.
+    wandb_project: str | None = None
+    wandb_entity: str | None = None     # None: your W&B user
+
     # Training data: the OLMo-core mix described by this file (mix.py builds it;
     # verify_mix.py checks it).
     mix_config: str = "mix.yaml"
@@ -282,6 +288,7 @@ H100_SETTINGS = TRAIN_SETTINGS.replace(
     sample_freq=1000,
     num_workers=8,              # p5.4xlarge has 16 vCPUs
     checkpoint_s3="s3://nano-mix/checkpoints",
+    wandb_project="nano-mix",
 )
 
 # Chosen with train.py --preset.

@@ -13,7 +13,9 @@ dependencies = [
     "matplotlib>=3.11.1",
     "numpy>=2.4.6",
     "pyarrow>=26.0.0",
+    "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
     "tqdm>=4.70.1",
     "transformers>=5.19.0",
+    "wandb>=0.31.0",
 ]
