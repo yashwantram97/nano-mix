@@ -11,8 +11,17 @@ from torch.utils.data import DataLoader, Dataset
 from mix import build_dataset, check_coverage, load_config
 
 
+# Target id that cross_entropy skips (its default ignore_index).
+IGNORE_INDEX = -100
+
+
 class MixInstances(Dataset):
-    """(input, target) pairs from mix instances: an instance of sequence_length tokens gives sequence_length - 1 next-token targets."""
+    """(input, target) pairs from mix instances, as OLMo-core builds them (data/utils.py get_labels).
+
+    The input is the whole instance (sequence_length tokens, so shapes stay exactly 1024); the
+    targets are the same tokens shifted left by one, with the last position set to IGNORE_INDEX
+    because its next token isn't in the instance. sequence_length - 1 targets are scored.
+    """
 
     def __init__(self, mix, indices):
         self.mix = mix
@@ -23,7 +32,8 @@ class MixInstances(Dataset):
 
     def __getitem__(self, i):
         ids = torch.as_tensor(self.mix[int(self.indices[i])]["input_ids"], dtype=torch.long)
-        return ids[:-1], ids[1:]
+        targets = torch.cat([ids[1:], ids.new_tensor([IGNORE_INDEX])])
+        return ids, targets
 
 
 def create_mix_dataloaders(mix_config, batch_size, val_instances, num_workers=0, pin_memory=False):
@@ -35,9 +45,12 @@ def create_mix_dataloaders(mix_config, batch_size, val_instances, num_workers=0,
     order = torch.randperm(len(mix), generator=torch.Generator().manual_seed(cfg["seed"]))
     val_idx, train_idx = order[:val_instances], order[val_instances:]
 
-    def loader(indices):
-        # No shuffle here: the indices are already in a seeded random order.
+    def loader(indices, workers):
+        # No shuffle here: the indices are already in a seeded random order. persistent_workers:
+        # the workers (each holding a copy of the OLMo-core dataset) start once, not per epoch.
         return DataLoader(MixInstances(mix, indices), batch_size=batch_size, drop_last=True,
-                          num_workers=num_workers, pin_memory=pin_memory)
+                          num_workers=workers, pin_memory=pin_memory,
+                          persistent_workers=workers > 0)
 
-    return loader(train_idx), loader(val_idx), cfg
+    # train.py reads a few val batches once, at the start; worker processes would only sit idle.
+    return loader(train_idx, num_workers), loader(val_idx, 0), cfg
