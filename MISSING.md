@@ -179,6 +179,20 @@ All `TrainSettings` defaults are for a quick Mac test. **Done**: `config.py` `H1
       A ~6 h rented run needs a checkpoint every ~30 min: model, optimizer, step, tokens seen, RNG
       state. The data order is a fixed seeded permutation (`dataloader.py:35`), so resuming only needs
       to skip `step × grad_accum_steps × batch_size` instances.
+- [ ] **Check on resume that the data continues exactly where it stopped.** Today this rests on
+      reasoning, not a check. The chain: OLMo-core sorts each source's glob
+      (`olmo_core/io.py:505`); the per-file instance allocation depends only on file sizes,
+      `requested_tokens`, ratios and batch size; the order is `torch.randperm` with `mix.yaml`'s seed
+      (`dataloader.py`); a resume skips `step × grad_accum_steps × batch_size` instances; and
+      `check_resume` refuses a changed `mix.yaml` or batch settings. `verify_mix.py` check 5 tests
+      determinism only within one box. Not caught today on a new box: a token file that changed size
+      (re-tokenized, with a matching new `meta.json`), a different torch version (`randperm`), or a
+      different OLMo-core version (allocation). Add two values to the checkpoint and compare them on
+      `--resume`, refusing on any mismatch:
+      - **mix fingerprint**: a hash of every file's (source/name, instance range) from
+        `dataset.paths` / `dataset.offsets`, plus the seed and the val split;
+      - **next-batch checksum**: the mix indices of the next ~4 training instances and a hash of their
+        tokens, which the resumed loader's first instances must match.
 - [x] **Metrics to a file** (JSONL/CSV: step, loss, lr, grad norm, tok/s, MFU, BPB per set), not only
       stdout. The loss plot (`loss.pdf`) is drawn only at the end.
 - [ ] **Linux CUDA environment with uv.** Check that `uv.lock` resolves a CUDA build of torch on
