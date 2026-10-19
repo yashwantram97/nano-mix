@@ -15,7 +15,7 @@ BPB is comparable across runs.
 
     uv run python eval_bpb.py --check-bytes          # byte table == len(text.encode("utf-8"))
     uv run python eval_bpb.py --random               # randomly initialized model (sanity check)
-    uv run python eval_bpb.py --checkpoint model.pth [--model 124m]
+    uv run python eval_bpb.py --checkpoint checkpoints/<run_id>/ckpt.pt    # or a weights-only .pth [--model 124m]
 """
 
 import argparse
@@ -132,6 +132,7 @@ def check_bytes(num_docs=100):
 
 
 def main():
+    from checkpointing import load_model_weights
     from config import MODEL_CONFIGS
     from model import GPTModel
     from train import resolve_device
@@ -140,8 +141,9 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check-bytes", action="store_true")
     group.add_argument("--random", action="store_true", help="randomly initialized model")
-    group.add_argument("--checkpoint", help="GPTModel state_dict, e.g. model.pth")
-    parser.add_argument("--model", choices=MODEL_CONFIGS, default="124m", help="config.py MODEL_CONFIGS name")
+    group.add_argument("--checkpoint", help="training checkpoint (ckpt.pt) or GPTModel state_dict (.pth)")
+    parser.add_argument("--model", choices=MODEL_CONFIGS, default="124m",
+                        help="config.py MODEL_CONFIGS name (ignored for a training checkpoint)")
     parser.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args()
 
@@ -151,9 +153,14 @@ def main():
 
     torch.manual_seed(123)
     cfg = MODEL_CONFIGS[args.model]
-    model = GPTModel(cfg)
+    weights = None
     if args.checkpoint:
-        model.load_state_dict(torch.load(args.checkpoint, weights_only=True))
+        # map_location="cpu" inside: a checkpoint saved on a GPU box loads on the Mac.
+        weights, ckpt_cfg = load_model_weights(args.checkpoint)
+        cfg = ckpt_cfg or cfg
+    model = GPTModel(cfg)
+    if weights is not None:
+        model.load_state_dict(weights)
     model.to(resolve_device())
     seq_len = BPB_WINDOW
 

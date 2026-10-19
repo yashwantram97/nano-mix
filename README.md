@@ -63,14 +63,19 @@ existing sets). See the "Fixed decisions" in `CLAUDE.md`.
 uv run python make_eval_sets.py                  # data/eval/<name>.npy|.json, ~2M tokens per set
 uv run python eval_bpb.py --check-bytes          # byte table == UTF-8 bytes of the text
 uv run python eval_bpb.py --random               # random init: BPB ~ uniform (sanity check)
-uv run python eval_bpb.py --checkpoint model.pth --model 124m  # holdout BPB of a checkpoint
+uv run python eval_bpb.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt  # holdout BPB of a checkpoint (or a weights-only .pth with --model)
 
 # Training logs holdout BPB + 3 greedy samples every eval_every_tokens (config.py) and at the end.
-# 200-step sanity run of the 124M config, evaluating every 50 steps (32 x 1024 tokens/step):
-HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG_124M, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=1_638_400))"
+# 200-step sanity run of the 124M config, evaluating every 50 steps (8 x 1024 tokens/step):
+HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG_124M, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=409_600), tag='smoke')"
+# The 5B run on an H100 (tmux): checkpoints every 30 min to checkpoints/<run_id>/ckpt.pt and
+# s3://nano-mix/checkpoints/<run_id>/, and on Ctrl-C / SIGTERM / spot notice. Resume with the same flags:
+uv run python -u train.py --model 124m --preset h100 2>&1 | tee -a logs/train_124m.log
+uv run python -u train.py --model 124m --preset h100 --resume checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt 2>&1 | tee -a logs/train_124m.log
+uv run python -u train.py --model 124m --preset h100 --max-steps 200 --tag smoke   # H100 smoke run
 
 # Export to Hugging Face (fails unless logits match the original within 1e-3)
-uv run python export_hf.py --checkpoint model.pth --model 124m --out exports/fw60_py20_fm13_gb07_s1234_124m
+uv run python export_hf.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt --out exports/fw60_py20_fm13_gb07_s1234_124m
 uv run python export_hf.py --random --out exports/random_init_124m
 
 # lm-eval 0-shot pilot tasks -> results/<run_name>.json, results/summary.md

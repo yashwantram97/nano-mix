@@ -1,4 +1,4 @@
-"""Convert a GPTModel checkpoint (train.py's model.pth) to transformers' LlamaForCausalLM.
+"""Convert a GPTModel checkpoint (train.py's checkpoints/<run_id>/ckpt.pt) to transformers' LlamaForCausalLM.
 
 The architecture is the same: RoPE (rotate-half, same frequencies), RMSNorm, SwiGLU, no biases
 in q/k/v or the MLP, tied embeddings as in config.py. One difference: model.py's attention output
@@ -8,11 +8,12 @@ q/k/v get zero biases and the forward pass is unchanged.
 The export is saved with the SmolLM2 tokenizer, then reloaded from disk and checked: the same
 input must give logits within 1e-3 (fp32) of the original model, or the script fails.
 
-    uv run python export_hf.py --checkpoint model.pth --model 124m --out exports/fw60_py20_fm13_gb07_s1234_124m
+    uv run python export_hf.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt --out exports/fw60_py20_fm13_gb07_s1234_124m
     uv run python export_hf.py --random --out exports/random_init_124m    # untrained, for sanity checks
 
---model picks the config.py MODEL_CONFIGS entry the checkpoint was trained with (a wrong one fails
-on the shape check when loading); use train.py's printed run name as the --out directory.
+--checkpoint takes a training checkpoint (checkpoints/<run_id>/ckpt.pt), which carries its own
+model config, or a weights-only .pth, for which --model picks the config.py MODEL_CONFIGS entry
+(a wrong one fails on the shape check when loading). Use the run id as the --out directory.
 """
 
 import argparse
@@ -21,6 +22,7 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
+from checkpointing import load_model_weights
 from config import MODEL_CONFIGS
 from model import GPTModel
 from tokenize_data import TOKENIZER
@@ -96,17 +98,22 @@ def check_logits(gpt, llama, cfg):
 def main():
     parser = argparse.ArgumentParser()
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--checkpoint", help="GPTModel state_dict, e.g. model.pth")
+    source.add_argument("--checkpoint", help="training checkpoint (ckpt.pt) or GPTModel state_dict (.pth)")
     source.add_argument("--random", action="store_true", help="randomly initialized model (seed 123)")
-    parser.add_argument("--model", choices=MODEL_CONFIGS, default="124m", help="config.py MODEL_CONFIGS name")
+    parser.add_argument("--model", choices=MODEL_CONFIGS, default="124m",
+                        help="config.py MODEL_CONFIGS name (ignored for a training checkpoint)")
     parser.add_argument("--out", required=True, help="output directory, e.g. exports/<run_name>")
     args = parser.parse_args()
 
     torch.manual_seed(123)
     cfg = MODEL_CONFIGS[args.model]
-    gpt = GPTModel(cfg)
+    weights = None
     if args.checkpoint:
-        gpt.load_state_dict(torch.load(args.checkpoint, weights_only=True, map_location="cpu"))
+        weights, ckpt_cfg = load_model_weights(args.checkpoint)
+        cfg = ckpt_cfg or cfg
+    gpt = GPTModel(cfg)
+    if weights is not None:
+        gpt.load_state_dict(weights)
     gpt.float()
 
     llama = convert(gpt, cfg)

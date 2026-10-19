@@ -144,15 +144,22 @@ terminal.
   `[eval 1,632,000 tokens] bpb/finemath 2.7455  bpb/fineweb_edu 1.9655 ...`
 - **Samples**: at each holdout eval, greedy 100-token generations from 3 fixed prompts (prose, code,
   math), through your `generate_text_simple`, which masks the padded vocab with `mask_padded_logits`.
-- **Step line** (every `eval_freq` steps), extended with: grad norm *before* clipping (from
-  `clip_grad_norm_`; measured even when clipping is off), clip fraction over the interval, param
-  norm, and tokens/sec. Throughput covers training only: time spent sampling and in holdout evals is
-  excluded.
-- **Run name and config**: printed once at the start, e.g. `Run: fw60_py20_fm13_gb07_s1234` (mix
-  ratios in percent, then the mix seed), followed by the mix ratios, seed, requested tokens, model
-  size and the full model and training settings as JSON.
-- Your existing train/val loss eval (`eval_freq`, `eval_iter`) and sample (`sample_freq`) are
-  unchanged. `resolve_device()` was pulled out of `main()` so `eval_bpb.py` can reuse it.
+- **Step line** (every `log_freq` steps): mean train loss, lr, mean grad norm *before* clipping
+  (from `clip_grad_norm_`; measured even when clipping is off), clip fraction, tokens/sec, s/step,
+  MFU (tok/s × `training_flops_per_token` ÷ the GPU's peak, looked up in `train.py` `PEAK_TFLOPS`:
+  989 TFLOP/s for the SXM H100 in p5 instances, 756 for PCIe) and peak CUDA memory. Losses and grad
+  norms stay on the GPU until this line, so it is the only host sync. Throughput covers training
+  only: time spent on val loss, sampling and holdout evals is excluded.
+- **Val line** (every `eval_freq` steps): train loss (mean since the last val line, no extra forward
+  passes), val loss on `eval_iter` fixed val batches loaded once at the start, and param norm.
+- **Metrics file**: every train, val and BPB record is appended as one JSON line to
+  `logs/<run_name>.jsonl` (`metrics_dir`), after a `run` record with the full config.
+- **Run name and config**: printed once at the start, e.g. `Run: fw60_py20_fm13_gb07_s1234_124m`
+  (mix ratios in percent, the mix seed, the model size), followed by the mix ratios, seed, requested
+  tokens, model size and the full model and training settings as JSON.
+- **Presets**: `train.py --preset mac` (quick test, the `TrainSettings` defaults) or `--preset h100`
+  (`H100_SETTINGS`, the 124M / 5B run). `resolve_device()` was pulled out of `main()` so
+  `eval_bpb.py` can reuse it.
 
 ## 4. Export to Hugging Face (`export_hf.py`)
 
@@ -273,13 +280,18 @@ uv run python make_eval_sets.py
 # BPB
 uv run python eval_bpb.py --check-bytes
 uv run python eval_bpb.py --random
-uv run python eval_bpb.py --checkpoint model.pth --model 124m
+uv run python eval_bpb.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt  # holdout BPB of a checkpoint (or a weights-only .pth with --model)
 
-# 200-step sanity run, holdout eval every ~50 steps (does not save model.pth)
-HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG_124M, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=1_638_400))"
+# 200-step sanity run, holdout eval every ~50 steps (run id ..._124m_smoke)
+HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG_124M, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=409_600), tag='smoke')"
+# The 5B run on an H100 (tmux): checkpoints every 30 min to checkpoints/<run_id>/ckpt.pt and
+# s3://nano-mix/checkpoints/<run_id>/, and on Ctrl-C / SIGTERM / spot notice. Resume with the same flags:
+uv run python -u train.py --model 124m --preset h100 2>&1 | tee -a logs/train_124m.log
+uv run python -u train.py --model 124m --preset h100 --resume checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt 2>&1 | tee -a logs/train_124m.log
+uv run python -u train.py --model 124m --preset h100 --max-steps 200 --tag smoke   # H100 smoke run
 
 # Export (fails unless logits match within 1e-3)
-uv run python export_hf.py --checkpoint model.pth --model 124m --out exports/fw60_py20_fm13_gb07_s1234_124m
+uv run python export_hf.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt --out exports/fw60_py20_fm13_gb07_s1234_124m
 uv run python export_hf.py --random --out exports/random_init_124m
 
 # Benchmarks -> results/<run_name>.json, results/summary.md
@@ -297,5 +309,5 @@ uv run python run_benchmarks.py --summary           # only rebuild summary.md
 - **SmolLM2-135M and pythia-160m** have not been benchmarked yet; each is one `run_benchmarks.py`
   command.
 - **Code-execution benchmarks** (HumanEval/MBPP): deliberately not set up.
-- **Checkpoint provenance**: `train.py` still saves to `model.pth` with no record of the run;
-  saving it under the run name (or with the printed config) would make exports traceable.
+- **Checkpoint provenance**: done. Checkpoints are saved under the run id
+  (`checkpoints/<run_id>/ckpt.pt`) with the model, train and mix settings inside.

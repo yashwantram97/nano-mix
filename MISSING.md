@@ -123,18 +123,18 @@ What has to change:
 
 These are in `train.py` and `dataloader.py`, ordered by how much they cost.
 
-- [ ] **Validation every 10 steps is ~15–20% of the run.** `train.py:251` runs `evaluate_model`
+- [x] **Validation every 10 steps is ~15–20% of the run.** `train.py:251` runs `evaluate_model`
       every `eval_freq=10` steps with `eval_iter=20` batches from *both* loaders. Over ~9,500 steps
       that is ~2.5B tokens of forward passes. Set it to every ~250 steps, and print a cheap train-loss
       line every 10–50 steps instead.
-- [ ] **Each eval restarts DataLoader workers.** `calc_loss_loader` (`train.py:147`) iterates the
+- [x] **Each eval restarts DataLoader workers.** `calc_loss_loader` (`train.py:147`) iterates the
       loaders fresh each time; with `num_workers=4` and no `persistent_workers`, that spawns 8
       processes (each pickling the OLMo-core dataset) every eval. Use a fixed in-memory val batch or
       `persistent_workers=True` (`dataloader.py:40`).
-- [ ] **A GPU→CPU sync on every micro-batch.** `running_loss += loss.item()` (`train.py:238`) blocks
+- [x] **A GPU→CPU sync on every micro-batch.** `running_loss += loss.item()` (`train.py:238`) blocks
       until the GPU finishes, so the CPU can't queue the next micro-batch. Sum on the GPU and call
       `.item()` only when logging. Same for `grad_norm ... .item()` (`:244`) every step.
-- [ ] **Sampling under `torch.compile`.** `model.compile()` (`:330`) compiles the model in place;
+- [x] **Sampling under `torch.compile`.** `model.compile()` (`:330`) compiles the model in place;
       `generate_text_simple` (`:31`) then calls it with a new sequence length for each generated
       token. Check the log for recompiles. If they happen, sample from an uncompiled copy of the
       weights.
@@ -143,18 +143,19 @@ These are in `train.py` and `dataloader.py`, ordered by how much they cost.
       Expected fit on 80 GB: micro-batch 32–64 × 1024 with `grad_accum_steps` 16–8, for 524,288
       tokens/step. A fused linear + cross-entropy kernel (e.g. Liger) would allow 128. Measure with
       `torch.cuda.max_memory_allocated()`.
-- [ ] **Fused AdamW**: `torch.optim.AdamW(..., fused=True)` (`:332`).
+- [x] **Fused AdamW**: `torch.optim.AdamW(..., fused=True)` (`:332`).
 - [ ] **Holdout BPB at the end of each eval** uses `settings.batch_size` and runs in fp32, on
       1024-token windows (decision 2). On an H100
       it is ~10M tokens of forward, which is fine at every 25M–250M tokens. The last batch of each set
       has a different shape, so it triggers a recompile once.
-- [ ] **No MFU number.** Only tok/s is printed. Add MFU = tok/s × FLOPs/token ÷ 756e12, and peak
-      memory, to each log line. This is the number that shows whether the target is met.
+- [x] **No MFU number.** Only tok/s is printed. Add MFU = tok/s × FLOPs/token ÷ peak (989e12 on
+      the p5's SXM H100, 756e12 on PCIe), and peak memory, to each log line. This is the number that shows whether the target is met.
 
 ## 6. Hyperparameters for the 124M run
 
-All `TrainSettings` defaults are for a quick Mac test (`max_steps=500`, `warmup_steps=5`,
-`batch_size=32`, `grad_accum_steps=1`). A separate H100 preset is needed:
+All `TrainSettings` defaults are for a quick Mac test. **Done**: `config.py` `H100_SETTINGS`
+(`train.py --preset h100`) with the values below (32 × 16; weight decay on matrices only, betas
+(0.9, 0.95) in both presets). Peak memory and whether 64 × 8 fits come from the smoke run:
 
 | setting | now | 124M / 5B (starting point) |
 |---|---|---|
@@ -172,11 +173,13 @@ All `TrainSettings` defaults are for a quick Mac test (`max_steps=500`, `warmup_
 
 ## 7. Running on a rented H100 (missing entirely)
 
-- [ ] **Checkpoints and resume.** Today `model.pth` is saved only at the very end (`train.py:416`).
+- [x] **Checkpoints and resume.** **Done** (`checkpointing.py`, `train.py --resume`): every 30 min, on
+      Ctrl-C / SIGTERM / spot notice and at the end, latest two kept, copied to S3; resume tested
+      bit-exact on CPU. Before: `model.pth` was saved only at the very end (`train.py:416`).
       A ~6 h rented run needs a checkpoint every ~30 min: model, optimizer, step, tokens seen, RNG
       state. The data order is a fixed seeded permutation (`dataloader.py:35`), so resuming only needs
       to skip `step × grad_accum_steps × batch_size` instances.
-- [ ] **Metrics to a file** (JSONL/CSV: step, loss, lr, grad norm, tok/s, MFU, BPB per set), not only
+- [x] **Metrics to a file** (JSONL/CSV: step, loss, lr, grad norm, tok/s, MFU, BPB per set), not only
       stdout. The loss plot (`loss.pdf`) is drawn only at the end.
 - [ ] **Linux CUDA environment with uv.** Check that `uv.lock` resolves a CUDA build of torch on
       linux-x86_64 (`uv sync` then `torch.cuda.is_available()` and an SDPA FlashAttention check).

@@ -8,6 +8,7 @@ rest is read in a seeded random order, at most once, so nothing is repeated.
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from checkpointing import ignore_stop_signals
 from mix import build_dataset, check_coverage, load_config
 
 
@@ -36,21 +37,27 @@ class MixInstances(Dataset):
         return ids, targets
 
 
-def create_mix_dataloaders(mix_config, batch_size, val_instances, num_workers=0, pin_memory=False):
-    """Returns (train_loader, val_loader, mix config dict)."""
+def create_mix_dataloaders(mix_config, batch_size, val_instances, num_workers=0, pin_memory=False,
+                           skip_instances=0):
+    """Returns (train_loader, val_loader, mix config dict).
+
+    skip_instances drops that many from the start of the training order: a resumed run passes
+    what it already trained on, so it continues with exactly the next batch.
+    """
     cfg = load_config(mix_config)
     check_coverage(cfg)
     mix, _ = build_dataset(cfg)
 
     order = torch.randperm(len(mix), generator=torch.Generator().manual_seed(cfg["seed"]))
-    val_idx, train_idx = order[:val_instances], order[val_instances:]
+    val_idx, train_idx = order[:val_instances], order[val_instances + skip_instances:]
 
     def loader(indices, workers):
         # No shuffle here: the indices are already in a seeded random order. persistent_workers:
         # the workers (each holding a copy of the OLMo-core dataset) start once, not per epoch.
         return DataLoader(MixInstances(mix, indices), batch_size=batch_size, drop_last=True,
                           num_workers=workers, pin_memory=pin_memory,
-                          persistent_workers=workers > 0)
+                          persistent_workers=workers > 0,
+                          worker_init_fn=ignore_stop_signals if workers else None)
 
     # train.py reads a few val batches once, at the start; worker processes would only sit idle.
     return loader(train_idx, num_workers), loader(val_idx, 0), cfg

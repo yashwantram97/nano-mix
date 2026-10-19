@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 # Import from local files
 from config import MODEL_CONFIGS, TRAIN_PRESETS, model_label
 from model import GPTModel, mask_padded_logits
+from checkpointing import Checkpointer, StopRequest, check_resume, load_checkpoint, to_cpu
 from dataloader import create_mix_dataloaders
 from eval_bpb import BPB_WINDOW, evaluate_bpb, load_eval_sets
 
@@ -239,7 +240,8 @@ def print_holdout_eval(model, eval_sets, tokenizer, device, settings, step, toke
 
 def train_model_simple(model, train_model, train_loader, val_batches, optimizer, device, settings,
                        start_context, tokenizer, amp=None, eval_sets=None, flops_per_token=None,
-                       peak_flops=None, metrics=None):
+                       peak_flops=None, metrics=None, start_step=0, tokens_seen=0, history=None,
+                       checkpointer=None, make_state=None, stop=None):
     """Train for ``settings.max_steps`` optimizer steps.
 
     One optimizer step consumes ``grad_accum_steps`` micro-batches. Their
@@ -252,9 +254,16 @@ def train_model_simple(model, train_model, train_loader, val_batches, optimizer,
     recompile the training graph. Losses and grad norms stay on the GPU between log lines:
     calling ``.item()`` per micro-batch would make the CPU wait for the GPU every time, so it
     could never queue the next micro-batch ahead.
+
+    A resumed run passes ``start_step``, ``tokens_seen`` and the loss ``history`` from its
+    checkpoint (and a train_loader that starts at the next unseen instance). After each step,
+    a checkpoint is saved when ``checkpointer`` says one is due, or when ``stop`` is set (Ctrl-C,
+    SIGTERM, spot notice), in which case training then returns early. Returns
+    (train_losses, val_losses, tokens seen, steps, finished).
     """
-    train_losses, val_losses, track_steps, track_tokens_seen = [], [], [], []
-    tokens_seen = 0
+    history = history or {"train_losses": [], "val_losses": [], "steps": [], "tokens": []}
+    train_losses, val_losses = history["train_losses"], history["val_losses"]
+    track_steps, track_tokens_seen = history["steps"], history["tokens"]
 
     max_steps = settings.max_steps
     accum_steps = settings.grad_accum_steps
@@ -262,7 +271,8 @@ def train_model_simple(model, train_model, train_loader, val_batches, optimizer,
     sample_freq = settings.sample_freq or settings.eval_freq * 10
     cuda = device.type == "cuda"
 
-    next_eval = settings.eval_every_tokens
+    # The first holdout eval threshold above tokens_seen (0 for a new run).
+    next_eval = (tokens_seen // settings.eval_every_tokens + 1) * settings.eval_every_tokens
     zero = torch.zeros((), device=device)
     # Sums over the steps since the last log line (GPU tensors) / since the last val loss.
     log_loss, log_grad_norm, log_clipped = zero.clone(), zero.clone(), zero.clone()
@@ -276,7 +286,7 @@ def train_model_simple(model, train_model, train_loader, val_batches, optimizer,
     batches = iter(train_loader)
     optimizer.zero_grad(set_to_none=True)
 
-    for step in range(1, max_steps + 1):
+    for step in range(start_step + 1, max_steps + 1):
         # The schedule is indexed by optimizer step, not micro-batch.
         lr = lr_at_step(step, settings)
         for group in optimizer.param_groups:
@@ -361,10 +371,19 @@ def train_model_simple(model, train_model, train_loader, val_batches, optimizer,
                                metrics)
             while next_eval <= tokens_seen:
                 next_eval += settings.eval_every_tokens
-        # tok/s measures training only, not the val loss, sampling and evals above.
+
+        if checkpointer and (stop or step == max_steps or checkpointer.due()):
+            # On a stop, wait for the S3 copy too: the machine may be about to go away.
+            checkpointer.save(make_state(step, tokens_seen, history), wait_upload=bool(stop) or step == max_steps)
+        if stop:
+            print(f"Stopped at step {step} ({stop.reason}). Resume with: "
+                  f"uv run python train.py --resume {checkpointer.path if checkpointer else '<checkpoint>'}")
+            return train_losses, val_losses, track_tokens_seen, track_steps, False
+
+        # tok/s measures training only, not the val loss, sampling, evals and checkpoints above.
         log_start += time.time() - paused
 
-    return train_losses, val_losses, track_tokens_seen, track_steps
+    return train_losses, val_losses, track_tokens_seen, track_steps, True
 
 
 def plot_losses(steps_seen, tokens_seen, train_losses, val_losses):
@@ -386,7 +405,12 @@ def plot_losses(steps_seen, tokens_seen, train_losses, val_losses):
     # plt.show()
 
 
-def main(gpt_config, settings):
+def main(gpt_config, settings, resume=None, tag=None):
+    """Train a new run, or continue the one in the checkpoint at ``resume``.
+
+    The run id is the run name (+ "_<tag>"); checkpoints go to <checkpoint_dir>/<run_id>/ and
+    metrics to <metrics_dir>/<run_id>.jsonl. A new run refuses to start over an existing one.
+    """
 
     torch.manual_seed(123)
     device = resolve_device()
@@ -405,13 +429,18 @@ def main(gpt_config, settings):
     # Initialize model
     ##############################
 
+    ckpt = load_checkpoint(resume) if resume else None
+    if ckpt and ckpt["model_config"] != dataclasses.asdict(gpt_config):
+        raise SystemExit(f"Can't resume: {resume} was trained with a different model config (--model)")
     model = GPTModel(gpt_config)
+    if ckpt:
+        model.load_state_dict(ckpt["model"])
     model.to(device)  # no assignment model = model.to(device) necessary for nn.Module classes
     train_model = model
     if settings.compile and device.type == "cuda":
         # A compiled wrapper sharing model's weights. Training steps go through it; sampling and
         # holdout BPB use model itself, so their changing shapes never recompile the training
-        # graph. state_dict keys and the saved model.pth stay those of model.
+        # graph. state_dict keys in checkpoints stay those of model (no _orig_mod. prefix).
         train_model = torch.compile(model)
         # Print every recompile. Expected: one or two at the first val loss (eval mode, no_grad).
         torch._logging.set_logs(recompiles=True)
@@ -420,6 +449,12 @@ def main(gpt_config, settings):
     # fused: one kernel for the whole update instead of several per parameter (CUDA only).
     optimizer = torch.optim.AdamW(groups, lr=settings.learning_rate, betas=settings.adam_betas,
                                   fused=device.type == "cuda")
+    if ckpt:
+        optimizer.load_state_dict(ckpt["optimizer"])  # moves the state to the params' device
+        torch.set_rng_state(ckpt["rng"]["torch"])
+        if device.type == "cuda" and ckpt["rng"]["cuda"] is not None:
+            torch.cuda.set_rng_state_all(ckpt["rng"]["cuda"])
+    start_step = ckpt["step"] if ckpt else 0
     print(f"AdamW: decay {settings.weight_decay} on {sum(p.numel() for p in groups[0]['params']) / 1e6:.1f}M "
           f"params, none on {sum(p.numel() for p in groups[1]['params']) / 1e6:.1f}M (norms, biases, embedding)")
 
@@ -427,24 +462,29 @@ def main(gpt_config, settings):
     # Set up dataloaders
     ##############################
 
-    # The OLMo-core mix from mix.yaml, built the same way as mix.py / verify_mix.py.
+    # The OLMo-core mix from mix.yaml, built the same way as mix.py / verify_mix.py. A resumed
+    # run skips the instances it already trained on (the order is a fixed seeded permutation).
     train_loader, val_loader, mix_cfg = create_mix_dataloaders(
         settings.mix_config,
         batch_size=settings.batch_size,
         val_instances=settings.val_instances,
         num_workers=settings.num_workers,
         pin_memory=device.type == "cuda",
+        skip_instances=start_step * settings.grad_accum_steps * settings.batch_size,
     )
+    if ckpt:
+        check_resume(ckpt, gpt_config, settings, mix_cfg)
     if mix_cfg["sequence_length"] != gpt_config.context_length:
         raise SystemExit(f"mix sequence_length {mix_cfg['sequence_length']} != "
                          f"model context_length {gpt_config.context_length}")
     if gpt_config.context_length < BPB_WINDOW:
         raise SystemExit(f"model context_length {gpt_config.context_length} < BPB_WINDOW {BPB_WINDOW}: "
                          "holdout BPB is scored on fixed 1024-token windows")
-    if settings.max_steps * settings.grad_accum_steps > len(train_loader):
-        raise SystemExit(f"{settings.max_steps} steps x {settings.grad_accum_steps} accum needs "
-                         f"{settings.max_steps * settings.grad_accum_steps:,} micro-batches; the mix "
-                         f"has {len(train_loader):,}. Lower max_steps (no repetition).")
+    remaining = settings.max_steps - start_step
+    if remaining * settings.grad_accum_steps > len(train_loader):
+        raise SystemExit(f"{remaining} steps x {settings.grad_accum_steps} accum needs "
+                         f"{remaining * settings.grad_accum_steps:,} micro-batches; the mix "
+                         f"has {len(train_loader):,} left. Lower max_steps (no repetition).")
 
     ##############################
     # Train model
@@ -457,8 +497,8 @@ def main(gpt_config, settings):
     print(f"Model: {n_params / 1e6:.1f}M parameters")
 
     tokens_per_step = settings.tokens_per_optimizer_step(gpt_config.context_length)
-    print(f"{len(train_loader):,} micro-batches covers the mix once; "
-          f"running {settings.max_steps:,} optimizer steps")
+    print(f"{len(train_loader):,} micro-batches left in the mix; "
+          f"running steps {start_step + 1:,}-{settings.max_steps:,}")
     print(f"Effective batch: {settings.batch_size} x {settings.grad_accum_steps} accum "
           f"x {gpt_config.context_length} ctx = {tokens_per_step:,} tokens/step "
           f"({tokens_per_step * settings.max_steps:,} tokens total)")
@@ -469,8 +509,13 @@ def main(gpt_config, settings):
               f"grad_accum_steps.")
 
     # The run config, printed once (mix ratios, seed, model size, LR, ...).
-    name = run_name(mix_cfg, gpt_config)
-    print(f"Run: {name}")
+    name = ckpt["run_id"] if ckpt else run_name(mix_cfg, gpt_config) + (f"_{tag}" if tag else "")
+    print(f"Run: {name}" + (f" (resuming after step {start_step:,})" if ckpt else ""))
+    run_dir = Path(settings.checkpoint_dir) / name
+    metrics_path = Path(settings.metrics_dir) / f"{name}.jsonl"
+    if not ckpt and ((run_dir / "ckpt.pt").exists() or metrics_path.exists()):
+        raise SystemExit(f"{run_dir}/ckpt.pt or {metrics_path} already exists. Resume it with "
+                         f"--resume {run_dir / 'ckpt.pt'}, pass --tag for a separate run, or delete them.")
     print("  " + json.dumps({
         "mix": mix_cfg["sources"], "mix_seed": mix_cfg["seed"],
         "mix_tokens": mix_cfg["requested_tokens"], "params_M": round(n_params / 1e6, 1),
@@ -492,19 +537,39 @@ def main(gpt_config, settings):
     else:
         print("MFU: GPU peak unknown (set peak_tflops), not printed")
 
-    metrics_path = Path(settings.metrics_dir) / f"{name}.jsonl"
     metrics = MetricsLog(metrics_path)
-    metrics("run", run_name=name, n_params=n_params, flops_per_token=flops_per_token,
-            peak_flops=peak_flops, model=dataclasses.asdict(gpt_config),
-            train=dataclasses.asdict(settings), mix=mix_cfg)
+    metrics("resume" if ckpt else "run", run_name=name, step=start_step, n_params=n_params,
+            flops_per_token=flops_per_token, peak_flops=peak_flops,
+            model=dataclasses.asdict(gpt_config), train=dataclasses.asdict(settings), mix=mix_cfg)
     print(f"Metrics: appended to {metrics_path}")
 
-    train_losses, val_losses, tokens_seen, steps_seen = train_model_simple(
+    checkpointer = Checkpointer(run_dir, settings.checkpoint_minutes, settings.checkpoint_s3,
+                                extra_uploads=[metrics_path])
+    print(f"Checkpoints: {run_dir}/ every {settings.checkpoint_minutes} min, on Ctrl-C / SIGTERM"
+          f"{' / spot notice' if settings.watch_spot else ''} and at the end"
+          + (f"; copied to {checkpointer.s3}/" if checkpointer.s3 else ""))
+
+    def make_state(step, tokens_seen, history):
+        return {
+            "run_id": name, "step": step, "tokens_seen": tokens_seen,
+            "model": to_cpu(model.state_dict()), "optimizer": to_cpu(optimizer.state_dict()),
+            "rng": {"torch": torch.get_rng_state(),
+                    "cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else None},
+            "history": history, "model_config": dataclasses.asdict(gpt_config),
+            "train_settings": dataclasses.asdict(settings), "mix": mix_cfg,
+        }
+
+    train_losses, val_losses, tokens_seen, steps_seen, finished = train_model_simple(
         model, train_model, train_loader, val_batches, optimizer, device, settings,
         start_context="Every effort moves you", tokenizer=tokenizer, amp=amp,
         eval_sets=eval_sets, flops_per_token=flops_per_token, peak_flops=peak_flops,
-        metrics=metrics,
+        metrics=metrics, start_step=start_step,
+        tokens_seen=ckpt["tokens_seen"] if ckpt else 0, history=ckpt["history"] if ckpt else None,
+        checkpointer=checkpointer, make_state=make_state, stop=StopRequest(settings.watch_spot),
     )
+    if finished:
+        print(f"Done. Final checkpoint: {checkpointer.path} "
+              f"(weights: torch.load(path, weights_only=True)['model'])")
 
     return train_losses, val_losses, tokens_seen, steps_seen, model
 
@@ -516,14 +581,22 @@ if __name__ == "__main__":
     parser.add_argument("--model", choices=MODEL_CONFIGS, default="124m", help="config.py MODEL_CONFIGS name")
     parser.add_argument("--preset", choices=TRAIN_PRESETS, default="mac",
                         help="config.py TRAIN_PRESETS name: mac (quick test) or h100 (the 5B run)")
+    parser.add_argument("--max-steps", type=int, help="override the preset's max_steps (smoke runs)")
+    parser.add_argument("--tag", help="suffix for the run id, e.g. smoke: a separate run with its own "
+                                      "checkpoints and metrics")
+    parser.add_argument("--resume", help="continue from this checkpoint (checkpoints/<run_id>/ckpt.pt); "
+                                         "--model, --preset and --max-steps must match it")
     args = parser.parse_args()
     model_config = MODEL_CONFIGS[args.model]
+    settings = TRAIN_PRESETS[args.preset]
+    if args.max_steps:
+        settings = settings.replace(max_steps=args.max_steps)
 
     ###########################
     # Initiate training
     ###########################
 
-    train_losses, val_losses, tokens_seen, steps_seen, model = main(model_config, TRAIN_PRESETS[args.preset])
+    train_losses, val_losses, tokens_seen, steps_seen, model = main(model_config, settings, resume=args.resume, tag=args.tag)
 
     ###########################
     # After training
@@ -532,9 +605,3 @@ if __name__ == "__main__":
     # Plot results
     plot_losses(steps_seen, tokens_seen, train_losses, val_losses)
     plt.savefig("loss.pdf")
-
-    # Save and load model
-    torch.save(model.state_dict(), "model.pth")
-    model = GPTModel(model_config)
-    model.load_state_dict(torch.load("model.pth", weights_only=True))
-

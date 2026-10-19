@@ -121,35 +121,46 @@ class ModelConfig:
 
 @dataclass
 class TrainSettings:
-    """One run. None of this affects checkpoint shapes."""
+    """One run. None of this affects checkpoint shapes.
+
+    The defaults are a quick Mac (MPS) test; H100_SETTINGS below is the 124M / 5B run.
+    """
 
     learning_rate: float = 5e-4
-    # Total *optimizer* steps -- the run length. One pass over the mix: 1,953,792
-    # instances - val_instances = 1,945,600 = 950 steps of 2048 sequences.
+    # Total *optimizer* steps -- the run length. One pass over the 5B mix: 4,932,096
+    # instances - val_instances 8,192 = 4,923,904 = 9,617 steps of 512 sequences.
     # train.py refuses to run more steps than the mix has (no repetition).
-    max_steps: int = 500        # quick local test run; 950 = one full pass
-    eval_freq: int = 10         # Evaluate every N steps
-    eval_iter: int = 20         # Batches averaged per evaluation
+    max_steps: int = 500        # quick local test run
+    # A train-loss line (mean over the steps since the last line, tok/s, MFU) every log_freq
+    # steps. It costs one GPU sync, nothing else.
+    log_freq: int = 10
+    # Validation loss every eval_freq steps, on eval_iter fixed val batches loaded once at the
+    # start (the same batches every time, so the curve isn't noise from changing batches).
+    eval_freq: int = 50
+    eval_iter: int = 20
     # Holdout BPB on the frozen sets in data/eval/ (eval_bpb.py), plus greedy samples from fixed
     # prompts, every this many training tokens and at the end of the run.
     eval_every_tokens: int = 25_000_000
     sample_freq: int = 250      # Generate a text sample every N steps
-    weight_decay: float = 0.1
 
-    # Micro-batch: how many sequences fit in memory at once.
-    batch_size: int = 32        # quick local test; 64 for a real run
+    # AdamW. Decay applies to the weight matrices only: norms, biases and the (tied)
+    # embedding get none. beta2 0.95 instead of PyTorch's 0.999, as GPT-2/3 and most LLM
+    # runs use: the second moment adapts faster, which keeps large-batch runs stable.
+    weight_decay: float = 0.1
+    adam_betas: tuple[float, float] = (0.9, 0.95)
+
+    # Micro-batch: how many sequences fit in memory at once. 8 x 1024 keeps the 124M model's
+    # logits (49,152 per token) small enough for a Mac.
+    batch_size: int = 8
 
     # Micro-batches accumulated before each optimizer step. The effective
     # batch is batch_size * grad_accum_steps * context_length tokens. Costs no
     # extra compute -- the same total FLOPs, just fewer optimizer updates --
     # and is the only way to reach a sane batch size when memory caps
-    # batch_size. GPT-2 small was pretrained near 500k tokens per step; at
-    # batch_size=2 and context_length=256 an accum of 1 gives 512, which is
-    # far too noisy for a stable run. 64 x 32 = 2048 sequences x 256 = 524,288
-    # tokens, the global_batch_size the mix was sized for in mix.yaml. On a
-    # bigger GPU, raise batch_size and lower this, keeping the product 2048.
-    # Set to 1 for a quick local test (32 x 256 = 8,192 tokens/step); use
-    # 32 with batch_size=64 for a real run.
+    # batch_size. GPT-2 small was pretrained near 500k tokens per step:
+    # 512 sequences x 1024 = 524,288 tokens, the global_batch_size the mix was
+    # sized for in mix.yaml (H100_SETTINGS: 32 x 16). 1 for a quick local test
+    # (8 x 1024 = 8,192 tokens/step).
     grad_accum_steps: int = 1
 
     # Clip the global gradient norm before each optimizer step. Set to 0 or
@@ -163,7 +174,7 @@ class TrainSettings:
     # hundred steps, when Adam's second-moment estimates are still noisy and a
     # full-size step can blow the model out.
     lr_schedule: str = "cosine"
-    warmup_steps: int = 5       # must be < max_steps; use 100 with max_steps=950
+    warmup_steps: int = 5       # must be < max_steps
     min_lr_ratio: float = 0.1
 
     # Autocast dtype for forward and loss. bf16 has fp32's exponent range, so
@@ -171,21 +182,37 @@ class TrainSettings:
     # older than Ampere, which has no bf16 support.
     precision: str = "bf16"
 
-    # torch.compile the model: fuses the many small ops of a 40M model into
-    # fewer kernels, typically 1.3-2x faster, after ~1 min of compiling at the
-    # start. CUDA only; MPS/CPU support is unreliable, so it is skipped there.
+    # torch.compile the model: fuses the many small ops into fewer kernels,
+    # typically 1.3-2x faster, after ~1 min of compiling at the start. CUDA
+    # only; MPS/CPU support is unreliable, so it is skipped there.
     compile: bool = True
 
-    # DataLoader worker processes. 0 loads batches on the training process,
-    # which starves the GPU between steps.
+    # Training DataLoader worker processes, kept alive for the whole run. 0 loads
+    # batches on the training process, which starves the GPU between steps.
     num_workers: int = 4
+
+    # Dense bf16 peak of the GPU in TFLOP/s, for MFU. None looks the GPU up by name
+    # (train.py PEAK_TFLOPS); if it isn't there, MFU isn't printed.
+    peak_tflops: float | None = None
+
+    # Metrics (train / val / BPB records) are appended to <metrics_dir>/<run_id>.jsonl.
+    metrics_dir: str = "logs"
+
+    # Checkpoints (checkpointing.py): <checkpoint_dir>/<run_id>/ckpt.pt every checkpoint_minutes
+    # (None: only on a stop signal and at the end), the previous one kept as ckpt_prev.pt. With
+    # checkpoint_s3 set, each one (and the metrics file) is also copied to <checkpoint_s3>/<run_id>/.
+    # watch_spot polls EC2 instance metadata for a spot interruption notice and checkpoints on it.
+    checkpoint_minutes: float | None = 30
+    checkpoint_dir: str = "checkpoints"
+    checkpoint_s3: str | None = None
+    watch_spot: bool = True
 
     # Training data: the OLMo-core mix described by this file (mix.py builds it;
     # verify_mix.py checks it).
     mix_config: str = "mix.yaml"
 
     # Mix instances held out for validation, chosen with mix.yaml's seed and
-    # never trained on. 8192 x 256 = 2.1M tokens.
+    # never trained on. 8192 x 1024 = 8.4M tokens.
     val_instances: int = 8192
 
     def __post_init__(self):
@@ -208,6 +235,9 @@ class TrainSettings:
                 f"min_lr_ratio must be in [0, 1], got {self.min_lr_ratio}")
         if self.num_workers < 0:
             raise ValueError(f"num_workers must be >= 0, got {self.num_workers}")
+        if self.log_freq < 1 or self.eval_freq < 1:
+            raise ValueError(
+                f"log_freq and eval_freq must be >= 1, got {self.log_freq}, {self.eval_freq}")
 
     def tokens_per_optimizer_step(self, context_length):
         return self.batch_size * self.grad_accum_steps * context_length
@@ -235,4 +265,24 @@ def model_label(cfg):
         if cfg == named:
             return name
     return f"d{cfg.emb_dim}l{cfg.n_layers}c{cfg.context_length}"
-TRAIN_SETTINGS = TrainSettings()
+TRAIN_SETTINGS = TrainSettings()  # quick Mac test
+
+# The 124M / 5B-token run on one H100 80GB: one pass over the whole mix.
+# Starting point from GPT-2 small; batch_size 64 x 8 also gives 512 sequences if it fits
+# (check peak memory in the smoke run).
+H100_SETTINGS = TRAIN_SETTINGS.replace(
+    learning_rate=6e-4,
+    max_steps=9_617,            # 4,923,904 train instances / 512 per step
+    warmup_steps=300,
+    batch_size=32,
+    grad_accum_steps=16,        # 32 x 16 x 1024 = 524,288 tokens/step
+    log_freq=10,
+    eval_freq=250,
+    eval_every_tokens=250_000_000,  # 20 holdout evals over the run
+    sample_freq=1000,
+    num_workers=8,              # p5.4xlarge has 16 vCPUs
+    checkpoint_s3="s3://nano-mix/checkpoints",
+)
+
+# Chosen with train.py --preset.
+TRAIN_PRESETS = {"mac": TRAIN_SETTINGS, "h100": H100_SETTINGS}
