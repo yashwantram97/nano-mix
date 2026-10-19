@@ -36,6 +36,7 @@ loop. The current code misses several of these (section 5).
    model's context (`train.py:182` passes `model.context_length`, `eval_bpb.py:149` uses
    `MODEL_CONFIG.context_length`). Pin it to a constant `BPB_WINDOW = 1024` in `eval_bpb.py`, so a
    config change can't silently change the metric, and refuse models whose context is shorter.
+   **Done**: `eval_bpb.py` `BPB_WINDOW`; `train.py` refuses a shorter model before training.
    Consequences:
    - The 40M runs' BPB (256-token windows, `logs/train_200.log`) is **not comparable** with the new
      numbers, and the 40M model can't be re-scored at 1024: it was trained at 256 context and its RoPE
@@ -108,7 +109,7 @@ What has to change:
 
 ## 4. Model: `config.py`, `model.py`
 
-- [ ] **124M config**: `emb_dim=768, n_heads=12, n_layers=12` with SwiGLU (hidden 2048), tied
+- [x] **124M config** (done: `config.py` `MODEL_CONFIG_124M`, `--model 124m`): `emb_dim=768, n_heads=12, n_layers=12` with SwiGLU (hidden 2048), tied
       49,152-vocab embedding, `context_length=1024`. Parameter count: embedding 37.7M +
       12 × 7.08M blocks = **~122.7M**, GPT-2-small size. Head dim stays 64.
       Add it as a second named config (e.g. `MODEL_CONFIG_124M`) instead of editing the 40M
@@ -193,8 +194,7 @@ All `TrainSettings` defaults are for a quick Mac test (`max_steps=500`, `warmup_
 
 - [ ] `export_hf.py` with the 124M config: it writes `max_position_embeddings = context_length`
       (1024) and checks logits within 1e-3. Output e.g. `exports/fw60_py20_fm13_gb07_s1234_124m`.
-      The run name has no model size today (`train.py` `run_name`), so 40M and 124M exports would get
-      the same name.
+      **Done**: `train.py` `run_name` ends in the size (`..._s1234_124m`); `export_hf.py --model`.
 - [ ] `run_benchmarks.py` on the Mac (decision 3), then `--summary` next to gpt2 (124M, the natural
       comparison), SmolLM2-135M and the 40M run.
 

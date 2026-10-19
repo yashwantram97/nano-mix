@@ -20,7 +20,8 @@ Building pretraining data for a ~100M-parameter model. The first experiment is a
    All settings are in `mix.yaml`; OLMo-core caches index files in `data/mix/`. `verify_mix.py`
    checks size, ratios (±0.5 pp), no repetition, content, determinism and instance shape.
    Builds and checks only; no training. Details in `mix.md`.
-4. **Train**: `train.py` trains `model.py`'s GPT (~40M params, sized in `config.py`) on the mix.
+4. **Train**: `train.py --model {124m,40m}` trains `model.py`'s GPT (named configs in `config.py`
+   `MODEL_CONFIGS`; 124M at 1024 context is the default, 40M at 256 was the Mac pilot) on the mix.
    `dataloader.py` builds the mix with `mix.py`'s `build_dataset`, holds out `val_instances` for
    validation, and reads each training instance at most once.
 5. **Eval**: `make_eval_sets.py` builds the frozen holdout sets in `data/eval/`; `eval_bpb.py` scores

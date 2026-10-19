@@ -30,10 +30,10 @@ class ModelConfig:
     # 49152 = 384 * 128, so pad_vocab_to_multiple_of adds no rows.
     vocab_size: int = 49152
 
-    # Sizes the RoPE cos/sin cache. Must equal sequence_length in mix.yaml: every
-    # mix instance is 256 tokens (train.py checks). 256, not 2048, to keep
-    # attention cheap enough for local training. With RoPE there is no
-    # position table, so this is not baked into the weights.
+    # Sizes the RoPE cos/sin cache. Must equal sequence_length in mix.yaml
+    # (train.py checks). 256 for the 40M Mac pilot; MODEL_CONFIG_124M uses 1024.
+    # With RoPE there is no position table, so this is not baked into the
+    # weights, but a model is only reliable up to the length it was trained at.
     context_length: int = 256
 
     # ~40M parameters: 18.9M in the (tied) embedding, 21.2M in 12 blocks of
@@ -217,5 +217,22 @@ class TrainSettings:
         return dataclasses.replace(self, **changes)
 
 
-MODEL_CONFIG = ModelConfig()
+MODEL_CONFIG = ModelConfig()  # 40M, 256 context: the Mac pilot
+
+# ~122.7M parameters, GPT-2-small size: 37.7M in the (tied) embedding, 85.0M in
+# 12 blocks of 7.08M. head_dim 64; SwiGLU hidden 2048 (swiglu_hidden_dim(768)).
+# Trained on the 5B-token, 1024-context mix (mix.yaml).
+MODEL_CONFIG_124M = ModelConfig(context_length=1024, emb_dim=768, n_heads=12, n_layers=12)
+
+# Named configs, chosen with --model in train.py, eval_bpb.py and export_hf.py.
+# The name goes into the run name, so 40M and 124M runs don't collide.
+MODEL_CONFIGS = {"40m": MODEL_CONFIG, "124m": MODEL_CONFIG_124M}
+
+
+def model_label(cfg):
+    """The MODEL_CONFIGS name of cfg, or a shape label for a modified config."""
+    for name, named in MODEL_CONFIGS.items():
+        if cfg == named:
+            return name
+    return f"d{cfg.emb_dim}l{cfg.n_layers}c{cfg.context_length}"
 TRAIN_SETTINGS = TrainSettings()

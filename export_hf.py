@@ -8,8 +8,11 @@ q/k/v get zero biases and the forward pass is unchanged.
 The export is saved with the SmolLM2 tokenizer, then reloaded from disk and checked: the same
 input must give logits within 1e-3 (fp32) of the original model, or the script fails.
 
-    uv run python export_hf.py --checkpoint model.pth --out exports/fw60_py20_fm13_gb07_s1234
-    uv run python export_hf.py --random --out exports/random_init    # untrained, for sanity checks
+    uv run python export_hf.py --checkpoint model.pth --model 124m --out exports/fw60_py20_fm13_gb07_s1234_124m
+    uv run python export_hf.py --random --out exports/random_init_124m    # untrained, for sanity checks
+
+--model picks the config.py MODEL_CONFIGS entry the checkpoint was trained with (a wrong one fails
+on the shape check when loading); use train.py's printed run name as the --out directory.
 """
 
 import argparse
@@ -18,7 +21,7 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
-from config import MODEL_CONFIG
+from config import MODEL_CONFIGS
 from model import GPTModel
 from tokenize_data import TOKENIZER
 
@@ -95,11 +98,12 @@ def main():
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--checkpoint", help="GPTModel state_dict, e.g. model.pth")
     source.add_argument("--random", action="store_true", help="randomly initialized model (seed 123)")
+    parser.add_argument("--model", choices=MODEL_CONFIGS, default="124m", help="config.py MODEL_CONFIGS name")
     parser.add_argument("--out", required=True, help="output directory, e.g. exports/<run_name>")
     args = parser.parse_args()
 
     torch.manual_seed(123)
-    cfg = MODEL_CONFIG
+    cfg = MODEL_CONFIGS[args.model]
     gpt = GPTModel(cfg)
     if args.checkpoint:
         gpt.load_state_dict(torch.load(args.checkpoint, weights_only=True, map_location="cpu"))

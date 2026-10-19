@@ -94,9 +94,11 @@ or edit them: every BPB number is only comparable on the same sets.
 
 ## 2. BPB evaluation (`eval_bpb.py`)
 
-`evaluate_bpb(model, eval_sets, seq_len, batch_size) -> {name: bpb}`
+`evaluate_bpb(model, eval_sets, batch_size) -> {name: bpb}`
 
-- **Windows**: each stream is cut into non-overlapping `seq_len` (256) windows. Window *i* reads
+- **Windows**: each stream is cut into non-overlapping `BPB_WINDOW` (1024) windows, fixed in
+  `eval_bpb.py` rather than taken from the model, and models with a shorter context are refused.
+  It was 256 until 2026-10-16, so the 40M runs' BPB isn't comparable. Window *i* reads
   tokens `[i·L, (i+1)·L)` and is scored on `[i·L+1, (i+1)·L+1)`, so every token after the first is
   scored exactly once.
 - **Loss**: `torch.no_grad()`, eval mode (the previous mode is restored), padded vocab rows
@@ -168,9 +170,9 @@ Converts a GPTModel state dict to `LlamaForCausalLM` and saves it with the SmolL
   `nn.Linear` with its default bias. Llama's `attention_bias` turns on all four q/k/v/o biases
   together, so the export sets q/k/v biases to zero and keeps the trained `o_proj` bias. The forward
   pass is identical.
-- `max_position_embeddings` = 256 (the training context), so lm-eval truncates longer contexts from
-  the left.
-- **Verification**: the saved files are reloaded and run on random tokens (2 × 256) next to the
+- `max_position_embeddings` = the training context (256 for 40M, 1024 for 124M), so lm-eval
+  truncates longer contexts from the left.
+- **Verification**: the saved files are reloaded and run on random tokens (2 × `context_length`) next to the
   original model, both fp32 on CPU. The script fails unless max |logit difference| < 1e-3. On
   `model.pth` the difference is exactly 0 (both run the same fp32 kernels). To confirm the check
   can fail: zeroing one `o_proj` bias gives 0.035, and a wrong RoPE theta gives 2.18.
@@ -271,17 +273,17 @@ uv run python make_eval_sets.py
 # BPB
 uv run python eval_bpb.py --check-bytes
 uv run python eval_bpb.py --random
-uv run python eval_bpb.py --checkpoint model.pth
+uv run python eval_bpb.py --checkpoint model.pth --model 124m
 
 # 200-step sanity run, holdout eval every ~50 steps (does not save model.pth)
-HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=409_600))"
+HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG_124M, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=1_638_400))"
 
 # Export (fails unless logits match within 1e-3)
-uv run python export_hf.py --checkpoint model.pth --out exports/fw60_py20_fm13_gb07_s1234
-uv run python export_hf.py --random --out exports/random_init
+uv run python export_hf.py --checkpoint model.pth --model 124m --out exports/fw60_py20_fm13_gb07_s1234_124m
+uv run python export_hf.py --random --out exports/random_init_124m
 
 # Benchmarks -> results/<run_name>.json, results/summary.md
-uv run python run_benchmarks.py exports/fw60_py20_fm13_gb07_s1234
+uv run python run_benchmarks.py exports/fw60_py20_fm13_gb07_s1234_124m
 uv run python run_benchmarks.py gpt2 HuggingFaceTB/SmolLM2-135M EleutherAI/pythia-160m
 uv run python run_benchmarks.py gpt2 --limit 20     # quick smoke test, marked partial
 uv run python run_benchmarks.py --summary           # only rebuild summary.md

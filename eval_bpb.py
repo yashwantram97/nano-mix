@@ -1,6 +1,6 @@
 """Bits per byte (BPB) on the frozen holdout sets in data/eval/ (made by make_eval_sets.py).
 
-Each eval stream is cut into non-overlapping seq_len windows; window i reads tokens
+Each eval stream is cut into non-overlapping BPB_WINDOW (1024) windows; window i reads tokens
 [i*L, (i+1)*L) and is scored on the next tokens [i*L+1, (i+1)*L+1), so every token after the
 first is scored exactly once. Over the whole set:
 
@@ -15,7 +15,7 @@ BPB is comparable across runs.
 
     uv run python eval_bpb.py --check-bytes          # byte table == len(text.encode("utf-8"))
     uv run python eval_bpb.py --random               # randomly initialized model (sanity check)
-    uv run python eval_bpb.py --checkpoint model.pth
+    uv run python eval_bpb.py --checkpoint model.pth [--model 124m]
 """
 
 import argparse
@@ -33,6 +33,9 @@ from tokenize_data import TOKENIZER, get_tokenizer
 
 EVAL = Path("data/eval")
 RAW_EVAL = Path("data/raw_eval")
+# Fixed, not the model's context, so a config change can't silently change the metric (CLAUDE.md).
+# Was 256 until 2026-10-16; BPB from the 40M runs used 256 and isn't comparable.
+BPB_WINDOW = 1024
 
 
 @functools.cache
@@ -63,8 +66,12 @@ def load_eval_sets(names=None):
 
 
 @torch.no_grad()
-def evaluate_bpb(model, eval_sets, seq_len, batch_size):
-    """{name: BPB} for a GPTModel. Restores the model's train/eval mode afterwards."""
+def evaluate_bpb(model, eval_sets, batch_size):
+    """{name: BPB} for a GPTModel on BPB_WINDOW windows. Restores the model's train/eval mode afterwards."""
+    if model.context_length < BPB_WINDOW:
+        raise SystemExit(f"model context_length {model.context_length} < BPB_WINDOW {BPB_WINDOW}: "
+                         "it can't be scored on the fixed BPB windows")
+    seq_len = BPB_WINDOW
     device = next(model.parameters()).device
     byte_lengths = token_byte_lengths()
     was_training = model.training
@@ -125,7 +132,7 @@ def check_bytes(num_docs=100):
 
 
 def main():
-    from config import MODEL_CONFIG
+    from config import MODEL_CONFIGS
     from model import GPTModel
     from train import resolve_device
 
@@ -134,6 +141,7 @@ def main():
     group.add_argument("--check-bytes", action="store_true")
     group.add_argument("--random", action="store_true", help="randomly initialized model")
     group.add_argument("--checkpoint", help="GPTModel state_dict, e.g. model.pth")
+    parser.add_argument("--model", choices=MODEL_CONFIGS, default="124m", help="config.py MODEL_CONFIGS name")
     parser.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args()
 
@@ -142,20 +150,21 @@ def main():
         return
 
     torch.manual_seed(123)
-    model = GPTModel(MODEL_CONFIG)
+    cfg = MODEL_CONFIGS[args.model]
+    model = GPTModel(cfg)
     if args.checkpoint:
         model.load_state_dict(torch.load(args.checkpoint, weights_only=True))
     model.to(resolve_device())
-    seq_len = MODEL_CONFIG.context_length
+    seq_len = BPB_WINDOW
 
     sets = load_eval_sets()
-    bpb = evaluate_bpb(model, sets, seq_len, args.batch_size)
+    bpb = evaluate_bpb(model, sets, args.batch_size)
     byte_lengths = token_byte_lengths()
     print(f"{'set':13s} {'BPB':>7s} {'uniform':>8s}")
     for name, tokens in sets.items():
         # A uniform guess costs log2(vocab) bits per scored token.
         scored = tokens[1 : (len(tokens) - 1) // seq_len * seq_len + 1]
-        uniform = math.log2(MODEL_CONFIG.vocab_size) * len(scored) / byte_lengths[scored].sum()
+        uniform = math.log2(cfg.vocab_size) * len(scored) / byte_lengths[scored].sum()
         print(f"{name:13s} {bpb[name]:7.3f} {uniform:8.3f}")
 
 

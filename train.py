@@ -15,10 +15,10 @@ from transformers import AutoTokenizer
 
 
 # Import from local files
-from config import MODEL_CONFIG, TRAIN_SETTINGS
+from config import MODEL_CONFIGS, TRAIN_SETTINGS, model_label
 from model import GPTModel, mask_padded_logits
 from dataloader import create_mix_dataloaders
-from eval_bpb import evaluate_bpb, load_eval_sets
+from eval_bpb import BPB_WINDOW, evaluate_bpb, load_eval_sets
 
 # Fixed prompts sampled (greedy, 100 tokens) at every holdout eval.
 SAMPLE_PROMPTS = {
@@ -62,10 +62,10 @@ def resolve_device():
     return torch.device("cpu")
 
 
-def run_name(mix_cfg):
-    """e.g. fw60_py20_fm13_gb07_s1234: mix ratios in percent, then the mix seed."""
+def run_name(mix_cfg, gpt_config):
+    """e.g. fw60_py20_fm13_gb07_s1234_124m: mix ratios in percent, the mix seed, the model size."""
     parts = [f"{SOURCE_ABBREV.get(n, n)}{round(r * 100):02d}" for n, r in mix_cfg["sources"].items()]
-    return "_".join(parts) + f"_s{mix_cfg['seed']}"
+    return "_".join(parts) + f"_s{mix_cfg['seed']}_{model_label(gpt_config)}"
 
 
 def resolve_precision(precision, device):
@@ -179,7 +179,7 @@ def generate_and_print_sample(model, tokenizer, device, start_context, amp=None)
 def print_holdout_eval(model, eval_sets, tokenizer, device, settings, tokens_seen, amp=None):
     """Holdout BPB per eval set, then greedy samples from the fixed prompts."""
     t0 = time.time()
-    bpb = evaluate_bpb(model, eval_sets, model.context_length, settings.batch_size)
+    bpb = evaluate_bpb(model, eval_sets, settings.batch_size)
     print(f"[eval {tokens_seen:,} tokens] " + "  ".join(f"bpb/{n} {v:.4f}" for n, v in bpb.items())
           + f"  ({time.time() - t0:.0f}s)")
     model.eval()
@@ -348,6 +348,9 @@ def main(gpt_config, settings):
     if mix_cfg["sequence_length"] != gpt_config.context_length:
         raise SystemExit(f"mix sequence_length {mix_cfg['sequence_length']} != "
                          f"model context_length {gpt_config.context_length}")
+    if gpt_config.context_length < BPB_WINDOW:
+        raise SystemExit(f"model context_length {gpt_config.context_length} < BPB_WINDOW {BPB_WINDOW}: "
+                         "holdout BPB is scored on fixed 1024-token windows")
     if settings.max_steps * settings.grad_accum_steps > len(train_loader):
         raise SystemExit(f"{settings.max_steps} steps x {settings.grad_accum_steps} accum needs "
                          f"{settings.max_steps * settings.grad_accum_steps:,} micro-batches; the mix "
@@ -376,7 +379,7 @@ def main(gpt_config, settings):
               f"grad_accum_steps.")
 
     # The run config, printed once (mix ratios, seed, model size, LR, ...).
-    print(f"Run: {run_name(mix_cfg)}")
+    print(f"Run: {run_name(mix_cfg, gpt_config)}")
     print("  " + json.dumps({
         "mix": mix_cfg["sources"], "mix_seed": mix_cfg["seed"],
         "mix_tokens": mix_cfg["requested_tokens"], "params_M": round(n_params / 1e6, 1),
@@ -397,12 +400,18 @@ def main(gpt_config, settings):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", choices=MODEL_CONFIGS, default="124m", help="config.py MODEL_CONFIGS name")
+    args = parser.parse_args()
+    model_config = MODEL_CONFIGS[args.model]
 
     ###########################
     # Initiate training
     ###########################
 
-    train_losses, val_losses, tokens_seen, steps_seen, model = main(MODEL_CONFIG, TRAIN_SETTINGS)
+    train_losses, val_losses, tokens_seen, steps_seen, model = main(model_config, TRAIN_SETTINGS)
 
     ###########################
     # After training
@@ -414,6 +423,6 @@ if __name__ == "__main__":
 
     # Save and load model
     torch.save(model.state_dict(), "model.pth")
-    model = GPTModel(MODEL_CONFIG)
+    model = GPTModel(model_config)
     model.load_state_dict(torch.load("model.pth", weights_only=True))
 

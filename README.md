@@ -63,18 +63,18 @@ existing sets). See the "Fixed decisions" in `CLAUDE.md`.
 uv run python make_eval_sets.py                  # data/eval/<name>.npy|.json, ~2M tokens per set
 uv run python eval_bpb.py --check-bytes          # byte table == UTF-8 bytes of the text
 uv run python eval_bpb.py --random               # random init: BPB ~ uniform (sanity check)
-uv run python eval_bpb.py --checkpoint model.pth # holdout BPB of a checkpoint
+uv run python eval_bpb.py --checkpoint model.pth --model 124m  # holdout BPB of a checkpoint
 
 # Training logs holdout BPB + 3 greedy samples every eval_every_tokens (config.py) and at the end.
-# 200-step sanity run on the pilot mix, evaluating every 50 steps:
-HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=409_600))"
+# 200-step sanity run of the 124M config, evaluating every 50 steps (32 x 1024 tokens/step):
+HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG_124M, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=1_638_400))"
 
 # Export to Hugging Face (fails unless logits match the original within 1e-3)
-uv run python export_hf.py --checkpoint model.pth --out exports/fw60_py20_fm13_gb07_s1234
-uv run python export_hf.py --random --out exports/random_init
+uv run python export_hf.py --checkpoint model.pth --model 124m --out exports/fw60_py20_fm13_gb07_s1234_124m
+uv run python export_hf.py --random --out exports/random_init_124m
 
 # lm-eval 0-shot pilot tasks -> results/<run_name>.json, results/summary.md
-uv run python run_benchmarks.py exports/fw60_py20_fm13_gb07_s1234
+uv run python run_benchmarks.py exports/fw60_py20_fm13_gb07_s1234_124m
 uv run python run_benchmarks.py gpt2 HuggingFaceTB/SmolLM2-135M EleutherAI/pythia-160m
 uv run python run_benchmarks.py --summary
 ```
