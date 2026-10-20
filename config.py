@@ -16,8 +16,6 @@ from dataclasses import dataclass
 
 FFN_TYPES = ("swiglu", "gelu")
 NORM_TYPES = ("rmsnorm", "layernorm")
-DELTA_BACKENDS = ("auto", "fla", "chunk", "recurrent")
-DELTA_CHUNK_SIZES = (16, 32, 64)
 PRECISIONS = ("bf16", "fp32")
 LR_SCHEDULES = ("cosine", "constant")
 
@@ -67,11 +65,6 @@ class ModelConfig:
     # when extending to longer contexts.
     rope_base: float = 10000.0
 
-    # Gated delta rule backend; "auto" resolves to the flash-linear-attention
-    # Triton kernel on CUDA and the pure-PyTorch chunkwise form elsewhere.
-    delta_backend: str = "auto"
-    delta_chunk_size: int = 64
-
     # Recompute each block's activations during backward instead of storing
     # them: roughly 33% more compute for a large drop in activation memory,
     # which is what lets batch size go up. Gradients are unchanged.
@@ -94,13 +87,6 @@ class ModelConfig:
             raise ValueError(f"ffn must be one of {FFN_TYPES}, got {self.ffn!r}")
         if self.norm not in NORM_TYPES:
             raise ValueError(f"norm must be one of {NORM_TYPES}, got {self.norm!r}")
-        if self.delta_backend not in DELTA_BACKENDS:
-            raise ValueError(
-                f"delta_backend must be one of {DELTA_BACKENDS}, got {self.delta_backend!r}")
-        if self.delta_chunk_size not in DELTA_CHUNK_SIZES:
-            raise ValueError(
-                f"delta_chunk_size must be one of {DELTA_CHUNK_SIZES}, "
-                f"got {self.delta_chunk_size}")
 
     @property
     def head_dim(self):

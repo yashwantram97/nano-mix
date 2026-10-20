@@ -73,7 +73,7 @@ HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_S
 # Logs to W&B project nano-mix: needs WANDB_API_KEY=<key> in .env (gitignored) on the box.
 uv run python -u train.py --model 124m --preset h100 2>&1 | tee -a logs/train_124m.log
 uv run python -u train.py --model 124m --preset h100 --resume checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt 2>&1 | tee -a logs/train_124m.log
-uv run python -u train.py --model 124m --preset h100 --max-steps 200 --tag smoke   # H100 smoke run
+uv run python -u train.py --model 124m --preset h100 --max-steps 200 --set warmup_steps=20 --tag smoke   # H100 smoke run (see STARTUP_COMMANDS.md)
 
 # Export to Hugging Face (fails unless logits match the original within 1e-3)
 uv run python export_hf.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt --out exports/fw60_py20_fm13_gb07_s1234_124m

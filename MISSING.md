@@ -127,7 +127,8 @@ What has to change:
       documents (python_edu ~510 tokens), at the cost of variable-length attention (document
       boundaries from EOS positions). Not planned for the first 124M run.
 - Not needed: GQA (`model.py` has none; at 124M it saves little), KV cache.
-- Clean-up: `delta_backend` / `delta_chunk_size` in `config.py` are unused by `model.py`.
+- Clean-up: `delta_backend` / `delta_chunk_size` in `config.py` are unused by `model.py`. **Done**
+  (2026-10-20): removed, with the uv `main.py` stub; `requirements.txt` re-exported.
 
 ## 5. Training loop: what keeps the H100 below 30% MFU
 
@@ -204,8 +205,14 @@ All `TrainSettings` defaults are for a quick Mac test. **Done**: `config.py` `H1
 
 - [ ] **No learning-rate sweep yet.** 6e-4 is GPT-2 small's value and probably conservative at
       524k tokens/step with betas (0.9, 0.95). Either accept it as the baseline, or run 3–4 short runs
-      (~500 steps each, ~10 min on the H100, e.g. 6e-4 / 1.2e-3 / 2e-3 / 3e-3 with
-      `--set learning_rate=... warmup_steps=50 --max-steps 500 --tag lr...`) and compare loss at step 500.
+      (~500 steps each, ~15–20 min on the H100 with compile and the final holdout eval, so ~1–1.3 h
+      for four, e.g. 6e-4 / 1.2e-3 / 2e-3 / 3e-3 with
+      `--set learning_rate=... warmup_steps=50 lr_schedule=constant --max-steps 500 --tag lr...`) and
+      compare loss at step 500 (constant LR, so a 500-step cosine doesn't decay it away; pick the lowest
+      smooth one, then back off a notch).
+      **Decision (2026-10-20): stay at 6e-4 for now.** Revisit after the smoke run, setup and clean-up
+      are done; worth doing before runs that get compared with each other (mix ablations), which
+      should all share one LR.
 
 ## 7. Running on a rented H100 (missing entirely)
 
