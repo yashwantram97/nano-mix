@@ -473,11 +473,9 @@ def main(gpt_config, settings, resume=None, tag=None):
     amp = autocast_ctx(device, precision)
     print(f"Using device: {device} ({precision})")
 
-    if device.type == "cuda":
-        # TF32 for the fp32 ops autocast leaves alone; negligible accuracy
-        # cost at this scale, meaningful speedup on the matmuls.
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+    # No TF32 (PyTorch's default for matmuls is off). Training matmuls run in bf16 under autocast,
+    # forward and backward, so TF32 wouldn't speed them up; its only effect would be on the fp32
+    # holdout BPB eval, which must stay true fp32 to be comparable with the Mac (CLAUDE.md).
 
     ##############################
     # Initialize model
@@ -644,15 +642,32 @@ if __name__ == "__main__":
     parser.add_argument("--preset", choices=TRAIN_PRESETS, default="mac",
                         help="config.py TRAIN_PRESETS name: mac (quick test) or h100 (the 5B run)")
     parser.add_argument("--max-steps", type=int, help="override the preset's max_steps (smoke runs)")
+    parser.add_argument("--set", nargs="+", default=[], metavar="KEY=VALUE",
+                        help="override TrainSettings fields, e.g. --set warmup_steps=20 batch_size=64 "
+                             "grad_accum_steps=8 (values are Python literals)")
     parser.add_argument("--tag", help="suffix for the run id, e.g. smoke: a separate run with its own "
                                       "checkpoints and metrics")
     parser.add_argument("--resume", help="continue from this checkpoint (checkpoints/<run_id>/ckpt.pt); "
-                                         "--model, --preset and --max-steps must match it")
+                                         "--model, --preset, --max-steps and --set must match it")
     args = parser.parse_args()
     model_config = MODEL_CONFIGS[args.model]
     settings = TRAIN_PRESETS[args.preset]
-    if args.max_steps:
-        settings = settings.replace(max_steps=args.max_steps)
+    # --max-steps and --set applied together, so e.g. a shorter run and a shorter warmup are
+    # validated as one change.
+    import ast
+    changes = {"max_steps": args.max_steps} if args.max_steps else {}
+    for item in args.set:
+        key, _, value = item.partition("=")
+        if key not in {f.name for f in dataclasses.fields(settings)}:
+            raise SystemExit(f"--set {item}: TrainSettings has no field {key!r}")
+        try:
+            changes[key] = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            changes[key] = value  # a bare string, e.g. checkpoint_dir=foo
+    try:
+        settings = settings.replace(**changes)
+    except ValueError as e:
+        raise SystemExit(f"Invalid settings: {e}")
 
     ###########################
     # Initiate training

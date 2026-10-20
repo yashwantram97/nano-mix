@@ -19,6 +19,9 @@ GPU's peak.
 | 5B tokens at that speed | **~5 h** (at 40% MFU, ~4 h) |
 | Today (40M, Mac, `logs/train_200.log`) | ~8k tokens/s |
 
+Update: the run uses an AWS p5.4xlarge, which has the **H100 SXM** (~989 TFLOP/s dense bf16), so
+30% MFU is ~297 TFLOP/s = **≥ ~349k tokens/s** at 0.85 GFLOP/token, ~4 h for 5B tokens.
+
 A 124M model at 30–45% MFU on an H100 is known to be reachable (nanoGPT / llm.c territory), but
 only with long sequences, large micro-batches, `torch.compile`, bf16 and no host syncs in the inner
 loop. The current code misses several of these (section 5).
@@ -66,44 +69,46 @@ Add ~1% on top: `val_instances` are taken out of the mix (8192 × 1024 = 8.4M to
 context), and OLMo-core rounds to whole batches.
 
 What has to change:
-- [ ] **Download more than the first file.** `download.py:165` takes `listings[name][0]` only, and
+- [x] **Download more than the first file.** `download.py:165` takes `listings[name][0]` only, and
       the disk check (`:153`) only sizes that file. Needs a `--num-files` (or `--target-tokens`)
       option, a loop over files, and `manifest.json` recording every file.
-- [ ] **Never download eval-only shards.** Taking the first N files avoids them today (they are the
+- [x] **Never download eval-only shards.** Taking the first N files avoids them today (they are the
       last shards), but the script should refuse them explicitly: fineweb_edu `000_00049.parquet`,
       finemath `train-00063-of-00064.parquet`, gutenberg `project_gutenberg-dolma-0014.json.gz`.
-- [ ] **python_edu: fetch past the pilot.** `PILOT_BLOBS = 250_000` is hard-coded (`:29`, `:103`).
+- [x] **python_edu: fetch past the pilot.** `PILOT_BLOBS = 250_000` is hard-coded (`:29`, `:103`).
       Need ~2M blobs: fetch metadata rows in ranges (e.g. 250k per output file, written as
       `content/rows-0000000-0250000.parquet`, ...), skip rows already fetched, and **exclude the
       8,000 eval blob_ids** listed in `data/raw_eval/python_edu.parquet`. `train-00000-of-00002`
       has 3,839,224 rows, so ~2M rows fit in it, well before the eval rows at its end.
-- [ ] **Remove or ignore `data/raw/python_edu/content/pilot-5000.parquet`.** It duplicates the first
+- [x] **Remove or ignore `data/raw/python_edu/content/pilot-5000.parquet`.** It duplicates the first
       5,000 blobs of `pilot-250000.parquet`. Today `tokenize_data.py` only reads the first file
       in sort order, so it is skipped by luck; once all files are tokenized it would put duplicates
       in the mix.
-- [ ] Download speed in the pilot was ~3.5 MB/s for fineweb_edu (`manifest.json`: 1.39 GB in 396 s),
+- [x] Download speed in the pilot was ~3.5 MB/s for fineweb_edu (`manifest.json`: 1.39 GB in 396 s),
       so ~1 h for fineweb_edu. S3 fetch time for ~2M blobs should be measured on a short run first.
+      **Done** on EC2: the full download took ~9 min (fineweb_edu ~171 MB/s; python_edu ~7,400 blobs/s).
 
 ## 2. Tokenize: `tokenize_data.py` is pilot-only
 
-- [ ] **Tokenize every raw file, not just the first.** `tokenize_data.py:115` has
+- [x] **Tokenize every raw file, not just the first.** `tokenize_data.py:115` has
       `input_files(name)[:1]`.
-- [ ] **`meta.json` must list all files of a source**, including ones skipped because their `.npy`
+- [x] **`meta.json` must list all files of a source**, including ones skipped because their `.npy`
       already exists. It is written from this run's jobs only. `mix.py` refuses a folder whose `.npy`
       files don't match `meta.json`, which catches a mismatch but doesn't fix it.
-- [ ] **Parallelism is one process per file.** Fine for many fineweb/finemath shards, but python_edu
+- [x] **Parallelism is one process per file.** Fine for many fineweb/finemath shards, but python_edu
       as one huge parquet would tokenize on a single core. Splitting it into ~250k-blob files when
       downloading (above) fixes this.
-- [ ] Re-run `verify_tokenized.py` on every new token file.
-- [ ] Disk: ~10 GB of uint16 tokens + ~15 GB new raw data. The Mac has ~96 GB free, so it fits.
+- [x] Re-run `verify_tokenized.py` on every new token file.
+- [x] Disk: ~10 GB of uint16 tokens + ~15 GB new raw data. The Mac has ~96 GB free, so it fits.
+      **Done** differently: downloaded and tokenized on EC2; raw and tokens (~71 GB) are in S3 `nano-mix`.
 
 ## 3. Mix: `mix.yaml`, `mix.py`, `verify_mix.py`
 
-- [ ] `mix.yaml`: `requested_tokens: 5000000000` (plus the ~1% val headroom), `sequence_length: 1024`.
-- [ ] Re-run `mix.py` (coverage check + build) and `verify_mix.py` (all six checks must pass).
+- [x] `mix.yaml`: `requested_tokens: 5000000000` (plus the ~1% val headroom), `sequence_length: 1024`.
+- [x] Re-run `mix.py` (coverage check + build) and `verify_mix.py` (all six checks must pass).
       Check 6 iterates every instance in Python: ~4.9M instances at 1024, ~2.5× today's 1.95M, so
       expect it to take ~2.5× as long.
-- [ ] `mix.md` documents the 500M / 256 pilot. Update its `mix.yaml` table once the values change.
+- [x] `mix.md` documents the 500M / 256 pilot. Update its `mix.yaml` table once the values change.
 - No code change needed in `mix.py`: it already globs every `.npy` per source, refuses eval shards
   and refuses any source that would have to repeat.
 
@@ -116,6 +121,11 @@ What has to change:
       defaults, so the 40M/Mac setup keeps working and `export_hf.py` can load either checkpoint.
 - [ ] Optional, a few % speed: fuse `W_query/W_key/W_value` (`model.py:112-114`) into one Linear
       so it runs as one matmul. Changes the checkpoint layout, so `export_hf.py` must split it again.
+- [ ] Optional, small quality: **attention within documents only.** An instance can hold several
+      documents joined by EOS, and attention crosses them today (as in GPT-2/3, nanoGPT and OLMo's
+      default). Llama 3 masks attention to the current document. Possibly a small gain with short
+      documents (python_edu ~510 tokens), at the cost of variable-length attention (document
+      boundaries from EOS positions). Not planned for the first 124M run.
 - Not needed: GQA (`model.py` has none; at 124M it saves little), KV cache.
 - Clean-up: `delta_backend` / `delta_chunk_size` in `config.py` are unused by `model.py`.
 
@@ -142,12 +152,33 @@ These are in `train.py` and `dataloader.py`, ordered by how much they cost.
       micro-batch of 64 × 1024, bf16 logits are ~6.4 GB, the fp32 upcast ~13 GB, plus its gradient.
       Expected fit on 80 GB: micro-batch 32–64 × 1024 with `grad_accum_steps` 16–8, for 524,288
       tokens/step. A fused linear + cross-entropy kernel (e.g. Liger) would allow 128. Measure with
-      `torch.cuda.max_memory_allocated()`.
+      `torch.cuda.max_memory_allocated()` (now in every log line).
+      **Fused linear + cross-entropy** ([Liger Kernel](https://github.com/linkedin/Liger-Kernel) or
+      Apple's Cut Cross-Entropy) is the one Triton kernel worth adding: the output head is ~30% of
+      the FLOPs at 124M, and the logits (32 × 1024 × 49,152: ~3 GB bf16 + ~6 GB fp32, plus their
+      gradient) are written out in full. A fused kernel never stores them: an estimated 5–15% tok/s,
+      and room for micro-batch 64–128. **Only if the smoke run is under ~35% MFU.** Check that it works
+      with `torch.compile`, and that its loss matches `F.cross_entropy` on the same batch.
+- [ ] Try `torch.compile(mode="max-autotune")` in a second smoke run: a few % (tuned matmul tiles,
+      CUDA graphs), but several minutes of compiling instead of ~1.
+- Not worth it at this size: hand-written Triton for norms / SwiGLU / RoPE (`torch.compile` already
+  generates fused Triton kernels for them); FlashAttention-3 / cuDNN attention (attention is ~13% of
+  FLOPs at T = 1024, and SDPA already picks a Hopper backend); FP8 matmuls (small gain at width 768,
+  numerics risk); Muon (a different optimizer experiment, not a speed fix).
 - [x] **Fused AdamW**: `torch.optim.AdamW(..., fused=True)` (`:332`).
-- [ ] **Holdout BPB at the end of each eval** uses `settings.batch_size` and runs in fp32, on
-      1024-token windows (decision 2). On an H100
-      it is ~10M tokens of forward, which is fine at every 25M–250M tokens. The last batch of each set
-      has a different shape, so it triggers a recompile once.
+- [ ] **Holdout BPB** uses `settings.batch_size` and runs in fp32 on 1024-token windows (decision 2),
+      on the **uncompiled** model (the training loop's compiled wrapper is only used for training
+      steps), so the last batch's different shape no longer recompiles anything. Cost not yet in the
+      time estimate: ~10M tokens of eager fp32 forward per eval, maybe 30–60 s on the H100, so 20
+      evals add roughly 10–20 min to the run. Measure in the smoke run (`[eval ...] (Ns)`).
+- [x] **Holdout BPB on the H100 isn't true fp32.** `train.py` sets `torch.backends.cuda.matmul.
+      allow_tf32 = True` for training, and it stays on during `evaluate_bpb`, so H100 BPB uses TF32
+      matmuls while the Mac uses full fp32: ~0.1% apart. Small, but it breaks the "fp32, comparable
+      across runs" fixed decision. Fix: switch TF32 off around `evaluate_bpb` (and back on after).
+      **Done** (2026-10-20): the TF32 switch is removed from `train.py`. It bought training nothing
+      (all training matmuls are bf16 under autocast, forward and backward); its only effect was on
+      BPB. Cost: each holdout eval runs true fp32 matmuls, slower than TF32 (estimate ~1 min instead
+      of ~10 s, ~20 min over 20 evals; see the BPB cost item above, measure in the smoke run).
 - [x] **No MFU number.** Only tok/s is printed. Add MFU = tok/s × FLOPs/token ÷ peak (989e12 on
       the p5's SXM H100, 756e12 on PCIe), and peak memory, to each log line. This is the number that shows whether the target is met.
 
@@ -171,11 +202,20 @@ All `TrainSettings` defaults are for a quick Mac test. **Done**: `config.py` `H1
 
 5B tokens is ~40 tokens per parameter: about 2× Chinchilla-optimal for 124M, a reasonable target.
 
+- [ ] **No learning-rate sweep yet.** 6e-4 is GPT-2 small's value and probably conservative at
+      524k tokens/step with betas (0.9, 0.95). Either accept it as the baseline, or run 3–4 short runs
+      (~500 steps each, ~10 min on the H100, e.g. 6e-4 / 1.2e-3 / 2e-3 / 3e-3 with
+      `--set learning_rate=... warmup_steps=50 --max-steps 500 --tag lr...`) and compare loss at step 500.
+
 ## 7. Running on a rented H100 (missing entirely)
 
 - [x] **Checkpoints and resume.** **Done** (`checkpointing.py`, `train.py --resume`): every 30 min, on
       Ctrl-C / SIGTERM / spot notice and at the end, latest two kept, copied to S3; resume tested
       bit-exact on CPU. Before: `model.pth` was saved only at the very end (`train.py:416`).
+      **On the GPU it isn't bit-exact**, and doesn't need to be: some CUDA backward kernels (embedding
+      gradient, attention backward) add in an order that varies between runs, so any two GPU runs,
+      interrupted or not, differ in the last bits and drift slightly. A resume continues the data,
+      weights, optimizer state and schedule exactly; only that kernel-level noise differs.
       A ~6 h rented run needs a checkpoint every ~30 min: model, optimizer, step, tokens seen, RNG
       state. The data order is a fixed seeded permutation (`dataloader.py:35`), so resuming only needs
       to skip `step × grad_accum_steps × batch_size` instances.
@@ -198,10 +238,14 @@ All `TrainSettings` defaults are for a quick Mac test. **Done**: `config.py` `H1
 - [ ] **Linux CUDA environment with uv.** Check that `uv.lock` resolves a CUDA build of torch on
       linux-x86_64 (`uv sync` then `torch.cuda.is_available()` and an SDPA FlashAttention check).
       `caffeinate` is macOS-only; on Linux use `tmux` alone.
-- [ ] **Moving data to the box.** Build the mix on the Mac (CPU only, per CLAUDE.md), then copy
+      Half done: `uv.lock` resolves torch 2.13.0 with CUDA 13.0 wheels on linux-x86_64 (needs driver
+      >= 580). The check on the box itself is in `STARTUP_COMMANDS.md` section 3.
+- [x] **Moving data to the box.** Build the mix on the Mac (CPU only, per CLAUDE.md), then copy
       `data/tokenized/` (~10 GB), `data/eval/` and the tokenizer files. `data/mix/` is rebuilt from
       `mix.yaml`, since `mix.py` resolves absolute source paths. Set `HF_HUB_OFFLINE=1` or pre-download
       the tokenizer on the box.
+      **Done** differently: data goes S3 → GPU box (same region, free) and the mix is built on the box;
+      commands in `STARTUP_COMMANDS.md`.
 - [ ] **A short smoke test before the full run**: ~200 steps at full size to measure tok/s, MFU and
       peak memory, and to confirm no recompiles, before paying for 6 h.
 - [ ] Optional, before spending the 6 h: a mix ablation at small scale (e.g. 40M on 1B tokens, 2–3
