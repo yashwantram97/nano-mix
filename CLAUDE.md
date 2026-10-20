@@ -19,7 +19,9 @@ Building pretraining data for a ~100M-parameter model. The first experiment is a
    API (`SourceMixtureDatasetConfig` + `NumpyFSLDatasetConfig.from_src_mix`, ai2-olmo-core 3.0.0).
    All settings are in `mix.yaml`; OLMo-core caches index files in `data/mix/`. `verify_mix.py`
    checks size, ratios (±0.5 pp), no repetition, content, determinism and instance shape.
-   Builds and checks only; no training. Details in `mix.md`.
+   Builds and checks only; no training. Details in `mix.md`. `trim_mix.py` writes a copy holding
+   only the tokens the mix reads (+ `manifest.json`), for boxes that download the data; `mix.py`
+   uses its recorded allocation when that folder is `tokenized_dir`.
 4. **Train**: `train.py --model {124m,40m}` trains `model.py`'s GPT (named configs in `config.py`
    `MODEL_CONFIGS`; 124M at 1024 context is the default, 40M at 256 was the Mac pilot) on the mix.
    `dataloader.py` builds the mix with `mix.py`'s `build_dataset`, holds out `val_instances` for

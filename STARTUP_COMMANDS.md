@@ -101,6 +101,22 @@ uv run python -u verify_mix.py 2>&1 | tee logs/verify_mix.log   # ~10 min; must 
 Don't start training if `verify_mix.py` fails. `train.py` builds the same mix itself (same
 `mix.yaml`), so this is the check, not a required step for training.
 
+### Optional: a trimmed copy for boxes outside AWS (~10 GB instead of 71 GB)
+
+The mix reads only the start of each token file. `trim_mix.py` copies just those tokens, plus a
+`manifest.json` with the per-file allocation, then rebuilds the mix from the copy and checks the
+instances are identical. Run it here, where the full files are:
+
+```bash
+uv run python -u trim_mix.py 2>&1 | tee logs/trim_mix.log   # writes data/tokenized_trimmed/; must end "PASS"
+aws s3 sync data/tokenized_trimmed/ s3://nano-mix/tokenized_trimmed/   # or to R2 (--endpoint-url ...)
+```
+
+On the other box, sync it to `data/tokenized/` (mix.yaml's `tokenized_dir`) and run `verify_mix.py`.
+`mix.py` sees `manifest.json` and uses the recorded allocation; it refuses the copy if `mix.yaml`
+changed since the trim, so trim again after any mix change. Resuming works across the two: the
+instances and their order are the same.
+
 ## 7. Smoke test (~200 steps, ~15 min)
 
 The H100 preset with 200 steps; warmup is lowered because it must be shorter than the run.
