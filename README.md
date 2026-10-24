@@ -1,89 +1,81 @@
-# data-mix
+# nano-mix
 
-Pretraining data pipeline for a ~100M-parameter model. Step 1 is `download.py`, which saves
-**raw** data to `data/raw/` (no tokenization, no text processing).
+Pretraining data for a small language model, and a ~124M GPT trained on it. The first experiment
+is a 5B-token mix of four sources (fineweb_edu 0.60, python_edu 0.20, finemath 0.13, gutenberg
+0.07), one pass, on one H100. Raw data is kept for bigger models and new sources later.
 
-`download.py` is currently a **pilot**: it downloads 1 file per source plus the first 250,000 python_edu
-files from Software Heritage S3, then prints download speeds and estimates for the full run.
+## Layout
 
-## Sources (pinned commits)
+```
+configs/mix.yaml          the training mix: sources and shares, size, seed
+src/nanomix/
+  paths.py                every data / output folder
+  sources.py              the sources, eval-only shards, tokenizer name (one place)
+  data/                   download -> tokenize -> mix, each with its verify_* check; loader.py feeds training
+  model/                  config.py (ModelConfig, "40m" / "124m"), gpt.py (the model)
+  train/                  cli.py (entry point), loop.py, settings.py ("mac" / "h100"), optim.py,
+                          precision.py, checkpoint.py, metrics.py
+  eval/                   make_eval_sets.py, bpb.py, sample.py, export_hf.py, benchmarks.py
+docs/                     how and why (below)
+results/                  benchmark results (in git)
+data/ checkpoints/ logs/ exports/ wandb/   not in git
+```
 
-| source | repo @ commit | pilot file |
-|---|---|---|
-| fineweb_edu | `HuggingFaceFW/fineweb-edu` @ `87f09149` | first of 50 in `data/CC-MAIN-2025-26/` (44.8 GB total) |
-| finemath | `HuggingFaceTB/finemath` @ `e92b25a6` | first of 64 in `finemath-4plus/` (18.4 GB total) |
-| gutenberg | `common-pile/project_gutenberg_filtered` @ `3cdf6879` | first of 15 `.json.gz` (7.6 GB total) |
-| python_edu | `HuggingFaceTB/smollm-corpus` @ `3ba9d605` | first metadata file in `python-edu/` + code for its first 250,000 blobs |
+Each pipeline step reads only the previous step's output. `data/` code never imports `train/` code.
 
 ## Setup
 
-Python is managed with uv (see `CLAUDE.md`). `requirements.txt` is exported from `uv.lock`.
+Python is managed with uv only (see `CLAUDE.md`).
 
 ```bash
 uv sync
 uv run hf auth login     # read token from https://huggingface.co/settings/tokens
 ```
 
-S3 access is tried anonymously first, then with your AWS credentials (`aws configure`).
-Without either, python_edu is skipped and the other sources still download.
+## Commands
 
-## Pilot run
-
-```bash
-uv run python download.py --source all
-```
-
-Use `--source fineweb_edu|finemath|gutenberg|python_edu` for a single source and `--workers N`
-for the number of parallel S3 fetches (default 32). Re-running skips files that are already complete.
-For a long run, start it inside `tmux` wrapped in `caffeinate -i`:
+Run every command from the repository root. Long jobs: inside `tmux`, wrapped in `caffeinate -i`
+on the Mac. If Hugging Face calls hang, prefix with `HF_HUB_OFFLINE=1`.
 
 ```bash
-tmux new -s download
-caffeinate -i uv run python download.py --source all
-# detach: Ctrl-b d    reattach: tmux attach -t download
+# 1. Download raw data to data/raw/ (never modified afterwards), then check it
+uv run nanomix-download --source all
+uv run nanomix-verify-download [--deep]
+
+# 2. Tokenize to data/tokenized/<source>/*.npy (flat uint16), then check
+uv run nanomix-tokenize --source all
+uv run nanomix-verify-tokenized
+
+# 3. Build the mix from configs/mix.yaml, then check it (all checks must pass)
+uv run nanomix-mix
+uv run nanomix-verify-mix
+uv run nanomix-trim-mix          # optional: a ~10 GB copy of only the tokens the mix reads
+
+# 4. Train (presets in train/settings.py). Use tee -ia, never tee -a (CLAUDE.md).
+uv run nanomix-train --preset mac --max-steps 20 --set warmup_steps=2 --tag smoke
+uv run nanomix-train --model 124m --preset h100 2>&1 | tee -ia logs/train_124m.log
+uv run nanomix-train --model 124m --preset h100 --resume checkpoints/<run_id>/ckpt.pt 2>&1 | tee -ia logs/train_124m.log
+
+# 5. Evaluate
+uv run nanomix-make-eval-sets    # the holdout sets are frozen: existing sets are never rebuilt
+uv run nanomix-eval-bpb --checkpoint checkpoints/<run_id>/ckpt.pt
+uv run nanomix-export-hf --checkpoint checkpoints/<run_id>/ckpt.pt --out exports/<run_id>
+uv run nanomix-benchmarks exports/<run_id>
+uv run nanomix-benchmarks --summary
 ```
 
-## Output
+Tests (CPU only, ~15 s): `uv run pytest`.
 
-```
-data/raw/
-  fineweb_edu/  finemath/  gutenberg/      first file of each, as-is
-  python_edu/metadata/                     first metadata parquet, as-is
-  python_edu/content/pilot-250000.parquet  blob_id, repo_name, path, score, text
-  python_edu/failed_blob_ids.txt
-  manifest.json                            repo, commit, files, bytes, date, status per source
-```
+The run id is the mix shares, the seed and the model size, e.g. `fw60_py20_fm13_gb07_s1234_124m`.
 
-## Evaluation
+## Docs
 
-The holdout sets are already built and frozen (never rebuild them; `make_eval_sets.py` skips
-existing sets). See the "Fixed decisions" in `CLAUDE.md`.
-
-```bash
-uv run python make_eval_sets.py                  # data/eval/<name>.npy|.json, ~2M tokens per set
-uv run python eval_bpb.py --check-bytes          # byte table == UTF-8 bytes of the text
-uv run python eval_bpb.py --random               # random init: BPB ~ uniform (sanity check)
-uv run python eval_bpb.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt  # holdout BPB of a checkpoint (or a weights-only .pth with --model)
-
-# Training logs holdout BPB + 3 greedy samples every eval_every_tokens (config.py) and at the end.
-# 200-step sanity run of the 124M config, evaluating every 50 steps (8 x 1024 tokens/step):
-HF_HUB_OFFLINE=1 uv run python -c "from config import MODEL_CONFIG_124M, TRAIN_SETTINGS; from train import main; main(MODEL_CONFIG_124M, TRAIN_SETTINGS.replace(max_steps=200, eval_every_tokens=409_600), tag='smoke')"
-# The 5B run on an H100 (tmux): checkpoints every 30 min to checkpoints/<run_id>/ckpt.pt and
-# s3://nano-mix/checkpoints/<run_id>/, and on Ctrl-C / SIGTERM / spot notice. Resume with the same flags.
-# Logs to W&B project nano-mix: needs WANDB_API_KEY=<key> in .env (gitignored) on the box.
-uv run python -u train.py --model 124m --preset h100 2>&1 | tee -a logs/train_124m.log
-uv run python -u train.py --model 124m --preset h100 --resume checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt 2>&1 | tee -a logs/train_124m.log
-uv run python -u train.py --model 124m --preset h100 --max-steps 200 --set warmup_steps=20 --tag smoke   # H100 smoke run (see STARTUP_COMMANDS.md)
-
-# Export to Hugging Face (fails unless logits match the original within 1e-3)
-uv run python export_hf.py --checkpoint checkpoints/fw60_py20_fm13_gb07_s1234_124m/ckpt.pt --out exports/fw60_py20_fm13_gb07_s1234_124m
-uv run python export_hf.py --random --out exports/random_init_124m
-
-# lm-eval 0-shot pilot tasks -> results/<run_name>.json, results/summary.md
-uv run python run_benchmarks.py exports/fw60_py20_fm13_gb07_s1234_124m
-uv run python run_benchmarks.py gpt2 HuggingFaceTB/SmolLM2-135M EleutherAI/pythia-160m
-uv run python run_benchmarks.py --summary
-```
-
-Long runs: inside `tmux`, wrapped in `caffeinate -i`.
-# nano-mix
+| doc | what |
+|---|---|
+| [docs/pipeline.md](docs/pipeline.md) | download, tokenize, and how OLMo-core builds the mix |
+| [docs/training.md](docs/training.md) | the model, the training loop, settings, checkpoints and resume |
+| [docs/eval.md](docs/eval.md) | holdout sets, BPB, export, benchmarks, results so far |
+| [docs/run_on_gpu.md](docs/run_on_gpu.md) | from an empty GPU box (Vast, AWS) to a finished run |
+| [docs/decisions.md](docs/decisions.md) | fixed decisions, with dates |
+| [docs/roadmap.md](docs/roadmap.md) | open items |
+| [docs/cleanup_and_understand.md](docs/cleanup_and_understand.md), [docs/answers.md](docs/answers.md) | the cleanup plan, and the must-know list with answers |

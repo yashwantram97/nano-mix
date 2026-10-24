@@ -30,3 +30,6 @@ wandb/
 results/samples/
 
 .env
+
+# Training console logs, metrics JSONL and loss plots (metrics go to S3 with checkpoints)
+logs/
